@@ -14,13 +14,13 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useRef, useState } from "react";
 import { Breadcrumb, BreadcrumbItem } from "@patternfly/react-core/dist/esm/components/Breadcrumb/index.js";
-import { Page, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
-import { Gallery, GalleryItem } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
+import { PageBreadcrumb, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Stack } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
 import { ExclamationCircleIcon } from '@patternfly/react-icons';
 
 import { EmptyStatePanel } from "cockpit-components-empty-state.jsx";
@@ -59,16 +59,15 @@ export const Service = ({ dbusClient, owner, unitId, unitIsValid, addTimerProper
         Promise.all(promises)
                 .then(replies => {
                     const unit_props = replies[0][0];
-                    const other_props = replies[1]?.[0];
 
                     // unwrap variants
                     for (const key in unit_props)
                         unit_props[key] = unit_props[key].v;
 
                     if (unitId.endsWith(".timer"))
-                        addTimerProperties(other_props, unit_props);
+                        addTimerProperties(replies[1][0], unit_props);
                     else if (unitId.endsWith(".socket"))
-                        unit_props.Listen = other_props.Listen.v;
+                        unit_props.Listen = replies[1][0].Listen.v;
 
                     unit_props.path = path;
 
@@ -147,33 +146,26 @@ export const Service = ({ dbusClient, owner, unitId, unitIsValid, addTimerProper
 
     return (
         <WithDialogs>
-            <Page groupProps={{ sticky: 'top' }}
-                    isBreadcrumbGrouped
-                    id="service-details"
-                    breadcrumb={
-                        <Breadcrumb>
-                            <BreadcrumbItem to={"#" + cockpit.location.href.replace(/\/[^?]*/, '')}>{_("Services")}</BreadcrumbItem>
-                            <BreadcrumbItem isActive>
-                                {cur_unit_id}
-                            </BreadcrumbItem>
-                        </Breadcrumb>}>
-                <PageSection>
-                    <Gallery hasGutter>
-                        <GalleryItem id="service-details-unit">
-                            <ServiceDetails unit={unitProps}
-                                            owner={owner}
-                                            permitted={superuser.allowed}
-                                            loadingUnits={reloading}
-                                            isValid={unitIsValid}
-                                            pinnedUnits={pinnedUnits} />
-                        </GalleryItem>
-                        {(load_state === "loaded" || load_state === "masked") &&
-                        <GalleryItem id="service-details-logs">
-                            <LogsPanel title={_("Service logs")} match={match} emptyMessage={_("No log entries")} max={10} goto_url={url} search_options={{ prio: "debug", [service_type]: cur_unit_id }} />
-                        </GalleryItem>}
-                    </Gallery>
-                </PageSection>
-            </Page>
+            <PageBreadcrumb stickyOnBreakpoint={{ default: "top" }}>
+                <Breadcrumb>
+                    <BreadcrumbItem to={"#" + cockpit.location.href.replace(/\/[^?]*/, '')}>{_("Services")}</BreadcrumbItem>
+                    <BreadcrumbItem isActive>
+                        {cur_unit_id}
+                    </BreadcrumbItem>
+                </Breadcrumb>
+            </PageBreadcrumb>
+            <PageSection id="service-details">
+                <Stack hasGutter>
+                    <ServiceDetails unit={unitProps}
+                                    owner={owner}
+                                    permitted={superuser.allowed}
+                                    loadingUnits={reloading}
+                                    isValid={unitIsValid}
+                                    pinnedUnits={pinnedUnits} />
+                    {(load_state === "loaded" || load_state === "masked") &&
+                    <LogsPanel title={_("Service logs")} match={match} emptyMessage={_("No log entries")} max={10} goto_url={url} search_options={{ prio: "debug", [service_type]: cur_unit_id }} />}
+                </Stack>
+            </PageSection>
         </WithDialogs>
     );
 };

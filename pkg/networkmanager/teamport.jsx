@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState, useContext } from 'react';
@@ -82,16 +82,16 @@ export const TeamPortDialog = ({ connection, dev, settings }) => {
                       title={_("Team port settings")}
         >
             <FormGroup fieldId={idPrefix + "-" + teamMode + "-prio-input"} label={_("Priority")}>
-                <TextInput id={idPrefix + "-" + teamMode + "-prio-input"} value={priority} onChange={setPriority} />
+                <TextInput id={idPrefix + "-" + teamMode + "-prio-input"} value={priority} onChange={(_event, value) => setPriority(value)} />
             </FormGroup>
             {teamMode == 'activebackup'
                 ? <FormGroup fieldId={idPrefix + "-activebackup-sticky-input"}>
-                    <Checkbox id={idPrefix + "-activebackup-sticky-input"} isChecked={sticky} onChange={setSticky} label={_("Sticky")} />
+                    <Checkbox id={idPrefix + "-activebackup-sticky-input"} isChecked={sticky} onChange={(_, s) => setSticky(s)} label={_("Sticky")} />
                 </FormGroup>
                 : null}
             {teamMode == 'lacp'
                 ? <FormGroup fieldId={idPrefix + "-" + teamMode + "-key-input"} label={_("LACP key")}>
-                    <TextInput id={idPrefix + "-" + teamMode + "-key-input"} value={key} onChange={setKey} />
+                    <TextInput id={idPrefix + "-" + teamMode + "-key-input"} value={key} onChange={(_event, value) => setKey(value)} />
                 </FormGroup>
                 : null}
         </NetworkModal>

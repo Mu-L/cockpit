@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
@@ -31,7 +31,7 @@ function DeleteAccountDialogBody({ state, change }) {
     return (
         <Checkbox id="account-confirm-delete-files"
                   label={_("Delete files")}
-                  isChecked={delete_files} onChange={checked => change("delete_files", checked)} />
+                  isChecked={delete_files} onChange={(_event, checked) => change("delete_files", checked)} />
     );
 }
 

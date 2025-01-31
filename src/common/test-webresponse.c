@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -48,6 +48,7 @@ typedef struct {
     const gchar *path;
     const gchar *header;
     const gchar *value;
+    const gchar *method;
     const gchar *expected_content_type;
     CockpitCacheType cache;
     gboolean for_tls_proxy;
@@ -89,6 +90,7 @@ setup (TestCase *tc,
     }
 
   tc->response = cockpit_web_response_new (io, path, path, headers,
+                                           (fixture && fixture->method) ? fixture->method : "GET",
                                            (fixture && fixture->for_tls_proxy) ? "https" : "http");
 
   if (headers)
@@ -167,8 +169,6 @@ test_return_error (TestCase *tc,
 {
   const gchar *resp;
 
-  cockpit_expect_message ("Returning error-response 500*");
-
   cockpit_web_response_error (tc->response, 500, NULL, "Reason here: %s", "booyah");
 
   resp = output_as_string (tc);
@@ -192,8 +192,6 @@ test_return_error_headers (TestCase *tc,
   const gchar *resp;
   GHashTable *headers;
 
-  cockpit_expect_message ("Returning error-response 500*");
-
   headers = cockpit_web_server_new_table ();
   g_hash_table_insert (headers, g_strdup ("Header1"), g_strdup ("value1"));
 
@@ -215,13 +213,11 @@ test_return_gerror_headers (TestCase *tc,
   GHashTable *headers;
   GError *error;
 
-  cockpit_expect_message ("Returning error-response 500*");
-
   headers = cockpit_web_server_new_table ();
   g_hash_table_insert (headers, g_strdup ("Header1"), g_strdup ("value1"));
 
   error = g_error_new (G_IO_ERROR, G_IO_ERROR_FAILED, "Reason here: %s", "booyah");
-  cockpit_web_response_gerror (tc->response, headers, error);
+  cockpit_web_response_gerror (tc->response, headers, NULL, error);
 
   g_error_free (error);
   g_hash_table_destroy (headers);
@@ -343,6 +339,14 @@ static const TestFixture content_type_fixture_png = {
 static const TestFixture content_type_fixture_wasm = {
   .path = "/src/common/mock-content/test.wasm",
   .expected_content_type = "application/wasm",
+};
+
+static const TestFixture fixture_head = {
+  .method = "HEAD",
+};
+
+static const TestFixture fixture_unsupported_method = {
+  .method = "PATCH",
 };
 
 static void
@@ -581,8 +585,6 @@ test_head (TestCase *tc,
   const gchar *resp;
   GBytes *content;
 
-  cockpit_web_response_set_method (tc->response, "HEAD");
-
   g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_READY);
 
   cockpit_web_response_headers (tc->response, 200, "OK", 19, NULL);
@@ -605,6 +607,18 @@ test_head (TestCase *tc,
   g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_SENT);
 
   g_assert_cmpstr (resp, ==, "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n" STATIC_HEADERS);
+}
+
+static void
+test_unsupported_method (TestCase *tc,
+                         gconstpointer data)
+{
+  cockpit_web_response_error (tc->response, 405, NULL, "Unsupported method");
+
+  const gchar *resp = output_as_string (tc);
+  g_assert (g_str_has_prefix (resp, "HTTP/1.1 405 Unsupported method\r\n"));
+  /* not a HEAD request, thus has body */
+  g_assert (strstr (resp, "<body>"));
 }
 
 static void
@@ -692,6 +706,32 @@ test_chunked_zero_length (TestCase *tc,
                    "26\r\nCockpit is perfect for new sysadmins, \r\n"
                    "37\r\ninspecting journals and starting and stopping services.\r\n0\r\n\r\n");
 }
+
+static void
+test_chunked_head (TestCase *tc,
+                   gconstpointer data)
+{
+  const gchar *resp;
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_READY);
+
+  cockpit_web_response_headers (tc->response, 200, "OK", -1, NULL);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_QUEUING);
+
+  while (g_main_context_iteration (NULL, FALSE));
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_QUEUING);
+  cockpit_web_response_complete (tc->response);
+
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_COMPLETE);
+
+  resp = output_as_string (tc);
+  g_assert_cmpint (cockpit_web_response_get_state (tc->response), ==, COCKPIT_WEB_RESPONSE_SENT);
+
+  g_assert_cmpstr (resp, ==, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" STATIC_HEADERS);
+}
+
 
 static GBytes *
 bytes_static (const gchar *data)
@@ -1102,7 +1142,7 @@ test_pop_path (TestPlain *tc,
   gchar *part;
   const gchar *start = "/cockpit/@localhost/another/test.html";
 
-  response = cockpit_web_response_new (tc->io, start, start, tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, start, start, tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, start);
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, NULL);
 
@@ -1142,7 +1182,7 @@ test_pop_path_root (TestPlain *tc,
   CockpitWebResponse *response;
   gchar *part;
 
-  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/");
 
   part = cockpit_web_response_pop_path (response);
@@ -1161,7 +1201,7 @@ test_skip_path (TestPlain *tc,
   CockpitWebResponse *response;
   const gchar *start = "/cockpit/@localhost/another/test.html";
 
-  response = cockpit_web_response_new (tc->io, start, start, tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, start, start, tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/cockpit/@localhost/another/test.html");
 
   g_assert (cockpit_web_response_skip_path (response) == TRUE);
@@ -1189,7 +1229,7 @@ test_skip_path_root (TestPlain *tc,
 {
   CockpitWebResponse *response;
 
-  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/");
 
   g_assert (cockpit_web_response_skip_path (response) == FALSE);
@@ -1205,31 +1245,31 @@ test_removed_prefix (TestPlain *tc,
 {
   CockpitWebResponse *response;
 
-  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/", "/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/");
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, NULL);
   cockpit_web_response_abort (response);
   g_clear_object (&response);
 
-  response = cockpit_web_response_new (tc->io, "/path/", "/path/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/path/", "/path/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/path/");
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, NULL);
   cockpit_web_response_abort (response);
   g_clear_object (&response);
 
-  response = cockpit_web_response_new (tc->io, "/path/path2/", "/path2/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/path/path2/", "/path2/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/path2/");
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, "/path");
   cockpit_web_response_abort (response);
   g_clear_object (&response);
 
-  response = cockpit_web_response_new (tc->io, "/mis/", "/match/", tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, "/mis/", "/match/", tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, "/match/");
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, NULL);
   cockpit_web_response_abort (response);
   g_clear_object (&response);
 
-  response = cockpit_web_response_new (tc->io, NULL, NULL, tc->headers, NULL);
+  response = cockpit_web_response_new (tc->io, NULL, NULL, tc->headers, "GET", NULL);
   g_assert_cmpstr (cockpit_web_response_get_path (response), ==, NULL);
   g_assert_cmpstr (cockpit_web_response_get_url_root (response), ==, NULL);
   cockpit_web_response_abort (response);
@@ -1476,12 +1516,16 @@ main (int argc,
               setup, test_stream, teardown);
   g_test_add ("/web-response/pressure", TestCase, NULL,
               setup, test_pressure, teardown);
-  g_test_add ("/web-response/head", TestCase, NULL,
+  g_test_add ("/web-response/head", TestCase, &fixture_head,
               setup, test_head, teardown);
+  g_test_add ("/web-response/unsupported-method", TestCase, &fixture_unsupported_method,
+              setup, test_unsupported_method, teardown);
   g_test_add ("/web-response/chunked-transfer-encoding", TestCase, NULL,
               setup, test_chunked_transfer_encoding, teardown);
   g_test_add ("/web-response/chunked-zero-length", TestCase, NULL,
               setup, test_chunked_zero_length, teardown);
+  g_test_add ("/web-response/chunked-head", TestCase, &fixture_head,
+              setup, test_chunked_head, teardown);
   g_test_add ("/web-response/abort", TestCase, NULL,
               setup, test_abort, teardown);
   g_test_add ("/web-response/connection-close", TestCase, &fixture_connection_close,

@@ -18,10 +18,9 @@
 import asyncio
 import json
 import logging
-import uuid
+import traceback
 
-from typing import Dict, Optional
-
+from .jsonutil import JsonError, JsonObject, JsonValue, create_object, get_int, get_str, get_str_or_none, typechecked
 
 logger = logging.getLogger(__name__)
 
@@ -38,16 +37,25 @@ class CockpitProblem(Exception):
     It is usually thrown in response to some violation of expected protocol
     when parsing messages, connecting to a peer, or opening a channel.
     """
-    def __init__(self, problem: str, message: str, **kwargs):
-        super().__init__(message)
-        self.message = message
-        self.problem = problem
-        self.kwargs = kwargs
+    attrs: JsonObject
+
+    def __init__(self, problem: str, msg: 'JsonObject | None' = None, **kwargs: JsonValue) -> None:
+        kwargs['problem'] = problem
+        self.attrs = create_object(msg, kwargs)
+        super().__init__(get_str(self.attrs, 'message', problem))
+
+    def get_attrs(self) -> JsonObject:
+        if self.attrs['problem'] == 'internal-error' and self.__cause__ is not None:
+            return dict(self.attrs, cause=traceback.format_exception(
+                self.__cause__.__class__, self.__cause__, self.__cause__.__traceback__
+            ))
+        else:
+            return self.attrs
 
 
 class CockpitProtocolError(CockpitProblem):
-    def __init__(self, message, problem='protocol-error'):
-        super().__init__(problem, message)
+    def __init__(self, message: str, problem: str = 'protocol-error'):
+        super().__init__(problem, message=message)
 
 
 class CockpitProtocol(asyncio.Protocol):
@@ -56,41 +64,43 @@ class CockpitProtocol(asyncio.Protocol):
     We need to use this because Python's SelectorEventLoop doesn't supported
     buffered protocols.
     """
-    transport: Optional[asyncio.Transport] = None
+    transport: 'asyncio.Transport | None' = None
     buffer = b''
     _closed: bool = False
-    _communication_done: Optional[asyncio.Future] = None
+    _communication_done: 'asyncio.Future[None] | None' = None
 
     def do_ready(self) -> None:
         pass
 
-    def do_closed(self, exc: Optional[Exception]) -> None:
+    def do_closed(self, exc: 'Exception | None') -> None:
         pass
 
-    def transport_control_received(self, command: str, message: Dict[str, object]) -> None:
+    def transport_control_received(self, command: str, message: JsonObject) -> None:
         raise NotImplementedError
 
-    def channel_control_received(self, channel: str, command: str, message: Dict[str, object]) -> None:
+    def channel_control_received(self, channel: str, command: str, message: JsonObject) -> None:
         raise NotImplementedError
 
     def channel_data_received(self, channel: str, data: bytes) -> None:
         raise NotImplementedError
 
-    def frame_received(self, frame):
-        channel, _, data = frame.partition(b'\n')
-        channel = channel.decode('ascii')
+    def frame_received(self, frame: bytes) -> None:
+        header, _, data = frame.partition(b'\n')
 
-        if channel != '':
+        if header != b'':
+            channel = header.decode('ascii')
             logger.debug('data received: %d bytes of data for channel %s', len(data), channel)
             self.channel_data_received(channel, data)
-        else:
-            message = json.loads(data)
-            try:
-                command = message['command']
-            except KeyError as exc:
-                raise CockpitProtocolError('control message is missing command field') from exc
 
-            channel = message.get('channel')
+        else:
+            self.control_received(data)
+
+    def control_received(self, data: bytes) -> None:
+        try:
+            message = typechecked(json.loads(data), dict)
+            command = get_str(message, 'command')
+            channel = get_str(message, 'channel', None)
+
             if channel is not None:
                 logger.debug('channel control received %s', message)
                 self.channel_control_received(channel, command, message)
@@ -98,52 +108,43 @@ class CockpitProtocol(asyncio.Protocol):
                 logger.debug('transport control received %s', message)
                 self.transport_control_received(command, message)
 
-    def consume_one_frame(self, view):
+        except (json.JSONDecodeError, JsonError) as exc:
+            raise CockpitProtocolError(f'control message: {exc!s}') from exc
+
+    def consume_one_frame(self, data: bytes) -> int:
         """Consumes a single frame from view.
 
         Returns positive if a number of bytes were consumed, or negative if no
         work can be done because of a given number of bytes missing.
         """
 
-        # Nothing to look at?  Save ourselves the trouble...
-        if not view:
-            return 0
-
-        view = bytes(view)
-        # We know the length + newline is never more than 10 bytes, so just
-        # slice that out and deal with it directly.  We don't have .index() on
-        # a memoryview, for example.
-        # From a performance standpoint, hitting the exception case is going to
-        # be very rare: we're going to receive more than the first few bytes of
-        # the packet in the regular case.  The more likely situation is where
-        # we get "unlucky" and end up splitting the header between two read()s.
-        header = bytes(view[:10])
         try:
-            newline = header.index(b'\n')
-        except ValueError:
-            if len(header) < 10:
+            newline = data.index(b'\n')
+        except ValueError as exc:
+            if len(data) < 10:
                 # Let's try reading more
-                return len(header) - 10
-            raise CockpitProtocolError("size line is too long")
+                return len(data) - 10
+            raise CockpitProtocolError("size line is too long") from exc
 
         try:
-            length = int(header[:newline])
-        except ValueError:
-            raise CockpitProtocolError("frame size is not an integer")
+            length = int(data[:newline])
+        except ValueError as exc:
+            raise CockpitProtocolError("frame size is not an integer") from exc
 
         start = newline + 1
         end = start + length
 
-        if end > len(view):
+        if end > len(data):
             # We need to read more
-            return len(view) - end
+            return len(data) - end
 
         # We can consume a full frame
-        self.frame_received(view[start:end])
+        self.frame_received(data[start:end])
         return end
 
-    def connection_made(self, transport):
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
         logger.debug('connection_made(%s)', transport)
+        assert isinstance(transport, asyncio.Transport)
         self.transport = transport
         self.do_ready()
 
@@ -151,13 +152,13 @@ class CockpitProtocol(asyncio.Protocol):
             logger.debug('  but the protocol already was closed, so closing transport')
             transport.close()
 
-    def connection_lost(self, exc):
+    def connection_lost(self, exc: 'Exception | None') -> None:
         logger.debug('connection_lost')
         assert self.transport is not None
         self.transport = None
         self.close(exc)
 
-    def close(self, exc: Optional[Exception] = None) -> None:
+    def close(self, exc: 'Exception | None' = None) -> None:
         if self._closed:
             return
         self._closed = True
@@ -167,19 +168,7 @@ class CockpitProtocol(asyncio.Protocol):
 
         self.do_closed(exc)
 
-        if self._communication_done is not None:
-            if exc is None:
-                self._communication_done.set_result(None)
-            else:
-                self._communication_done.set_exception(exc)
-
-    def write_frame(self, frame):
-        frame_length = len(frame)
-        header = f'{frame_length}\n'.encode('ascii')
-        if self.transport is not None:
-            self.transport.write(header + frame)
-
-    def write_channel_data(self, channel, payload):
+    def write_channel_data(self, channel: str, payload: bytes) -> None:
         """Send a given payload (bytes) on channel (string)"""
         # Channel is certainly ascii (as enforced by .encode() below)
         frame_length = len(channel + '\n') + len(payload)
@@ -190,26 +179,16 @@ class CockpitProtocol(asyncio.Protocol):
         else:
             logger.debug('cannot write to closed transport')
 
-    def write_message(self, _channel, **kwargs):
-        """Format kwargs as a JSON blob and send as a message
-           Any kwargs with '_' in their names will be converted to '-'
-        """
-        for name in list(kwargs):
-            if '_' in name:
-                kwargs[name.replace('_', '-')] = kwargs[name]
-                del kwargs[name]
+    def write_control(self, msg: 'JsonObject | None' = None, **kwargs: JsonValue) -> None:
+        """Write a control message.  See jsonutil.create_object() for details."""
+        logger.debug('sending control message %r %r', msg, kwargs)
+        pretty = json.dumps(create_object(msg, kwargs), indent=2) + '\n'
+        self.write_channel_data('', pretty.encode())
 
-        logger.debug('sending message %s %s', _channel, kwargs)
-        pretty = json.dumps(kwargs, indent=2) + '\n'
-        self.write_channel_data(_channel, pretty.encode('utf-8'))
-
-    def write_control(self, **kwargs):
-        self.write_message('', **kwargs)
-
-    def data_received(self, data):
+    def data_received(self, data: bytes) -> None:
         try:
             self.buffer += data
-            while True:
+            while self.buffer:
                 result = self.consume_one_frame(self.buffer)
                 if result <= 0:
                     return
@@ -217,78 +196,67 @@ class CockpitProtocol(asyncio.Protocol):
         except CockpitProtocolError as exc:
             self.close(exc)
 
-    def eof_received(self) -> Optional[bool]:
+    def eof_received(self) -> bool:
         return False
-
-    async def communicate(self) -> None:
-        """Wait until communication is complete on this protocol."""
-        assert self._communication_done is None
-        self._communication_done = asyncio.get_running_loop().create_future()
-        await self._communication_done
-        self._communication_done = None
 
 
 # Helpful functionality for "server"-side protocol implementations
 class CockpitProtocolServer(CockpitProtocol):
-    init_host: Optional[str] = None
-    authorizations: Optional[Dict[str, asyncio.Future]] = None
+    init_host: 'str | None' = None
+    authorizations: 'dict[str, asyncio.Future[JsonObject]] | None' = None
+    next_auth_id = 0
 
-    def do_send_init(self):
+    def do_send_init(self) -> None:
         raise NotImplementedError
 
-    def do_init(self, message):
+    def do_init(self, message: JsonObject) -> None:
         pass
 
-    def do_kill(self, host: Optional[str], group: Optional[str]) -> None:
+    def do_kill(self, host: 'str | None', group: 'str | None', message: JsonObject) -> None:
         raise NotImplementedError
 
-    def transport_control_received(self, command, message):
+    def transport_control_received(self, command: str, message: JsonObject) -> None:
         if command == 'init':
-            try:
-                if int(message['version']) != 1:
-                    raise CockpitProtocolError('incorrect version number', 'protocol-error')
-            except KeyError as exc:
-                raise CockpitProtocolError('version field is missing', 'protocol-error') from exc
-            except ValueError as exc:
-                raise CockpitProtocolError('version field is not an int', 'protocol-error') from exc
-
-            try:
-                self.init_host = message['host']
-            except KeyError as exc:
-                raise CockpitProtocolError('missing host field', 'protocol-error') from exc
+            if get_int(message, 'version') != 1:
+                raise CockpitProtocolError('incorrect version number')
+            self.init_host = get_str(message, 'host')
             self.do_init(message)
         elif command == 'kill':
-            self.do_kill(message.get('host'), message.get('group'))
+            self.do_kill(get_str_or_none(message, 'host', None), get_str_or_none(message, 'group', None), message)
         elif command == 'authorize':
             self.do_authorize(message)
         else:
             raise CockpitProtocolError(f'unexpected control message {command} received')
 
-    def do_ready(self):
+    def do_ready(self) -> None:
         self.do_send_init()
 
     # authorize request/response API
-    async def request_authorization(self, challenge: str, timeout: Optional[int] = None, **kwargs: object) -> str:
+    async def request_authorization_object(
+        self, challenge: str, timeout: 'int | None' = None, **kwargs: JsonValue
+    ) -> JsonObject:
         if self.authorizations is None:
             self.authorizations = {}
-        cookie = str(uuid.uuid4())
+        cookie = str(self.next_auth_id)
+        self.next_auth_id += 1
         future = asyncio.get_running_loop().create_future()
         try:
             self.authorizations[cookie] = future
-            self.write_control(command='authorize', challenge=challenge, cookie=cookie, **kwargs)
+            self.write_control(None, command='authorize', challenge=challenge, cookie=cookie, **kwargs)
             return await asyncio.wait_for(future, timeout)
         finally:
             self.authorizations.pop(cookie)
 
-    def do_authorize(self, message: Dict[str, object]) -> None:
-        cookie = message.get('cookie')
-        response = message.get('response')
+    async def request_authorization(
+        self, challenge: str, timeout: 'int | None' = None, **kwargs: JsonValue
+    ) -> str:
+        return get_str(await self.request_authorization_object(challenge, timeout, **kwargs), 'response')
 
-        if not isinstance(cookie, str) or not isinstance(response, str):
-            raise CockpitProtocolError('invalid authorize response')
+    def do_authorize(self, message: JsonObject) -> None:
+        cookie = get_str(message, 'cookie')
 
         if self.authorizations is None or cookie not in self.authorizations:
             logger.warning('no matching authorize request')
             return
 
-        self.authorizations[cookie].set_result(response)
+        self.authorizations[cookie].set_result(message)

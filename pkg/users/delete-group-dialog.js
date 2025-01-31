@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
@@ -39,7 +39,7 @@ export function delete_group_dialog(group) {
                     </Text>
                 </TextContent>
                 <List>
-                    {group.userlistPrimary.map(account => <ListItem key={account}>{account}</ListItem>)}
+                    {group.userlistPrimary.map(account => <ListItem className='list-item' key={account}>{account}</ListItem>)}
                 </List>
             </Stack>
             : null

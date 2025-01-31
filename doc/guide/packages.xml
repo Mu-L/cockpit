@@ -108,7 +108,6 @@ $ cockpit-bridge --packages
           where there are conflicts. For example given two packages with the same
           <code>name</code> a package is chosen based on its priority.</para></listitem>
       </varlistentry>
-      <!-- TODO: enable this once moving to the Python bridge by default; also update example below
       <varlistentry>
         <term>conditions</term>
         <listitem><para>An optional list of <code>{"predicate": "value"}</code> objects. Cockpit will only
@@ -117,7 +116,6 @@ $ cockpit-bridge --packages
           This is preferable to using <code>priority</code>, but only available since Cockpit FIXME-RELEASE.</para>
         </listitem>
       </varlistentry>
-      -->
       <varlistentry>
         <term>requires</term>
         <listitem><para>An optional JSON object that contains a <code>"cockpit"</code>
@@ -262,7 +260,6 @@ $ cockpit-bridge --packages
 }
 </programlisting>
 
-<!-- TODO: enable this once moving to the Python bridge by default
 <programlisting>
 {
   "version": 0,
@@ -282,17 +279,18 @@ $ cockpit-bridge --packages
   }
 }
 </programlisting>
--->
 
   </section>
 
   <section id="package-manifest-override">
     <title>Manifest overrides</title>
 
-    <para>A file called <filename>override.json</filename> may be placed next to the manifest, or a file
-      <filename>&lt;package-directory-name&gt;.override.json</filename> may be placed into <filename>/etc/cockpit/</filename>
-      or <filename>~/.config/cockpit</filename>.
-      These contain overrides to the information in the manifest in the simple
+    <para>To change a manifest system-wide, a file <filename>&lt;package-directory-name&gt;.override.json</filename>
+      may be placed into <filename>/etc/cockpit/</filename>, or below <code>$XDG_CONFIG_DIRS</code>
+      if set (see <ulink url="./cockpit.conf.5.html">cockpit.conf</ulink>). To change it for a particular user only, put the
+      override into <filename>~/.config/cockpit</filename>.</para>
+
+    <para>These override the information in the manifest in the simple
       <ulink url="https://tools.ietf.org/html/rfc7386">JSON Merge Patch</ulink> format.</para>
 
     <para>This can be used to hide or modify menu items of an existing package.
@@ -336,28 +334,12 @@ $ cockpit-bridge --packages
   <section id="package-minified">
     <title>Content Negotiation</title>
 
-    <para>In order to support language specific files, gzipped and/or minified data, the
-      files in a package are loaded using content negotiation logic.</para>
-
-    <para>If a file does not exist at the expected path, Cockpit tries to insert
-      <code>.min</code> before its extension. It also tries adding a <code>.gz</code>
-      to both of those file names. If the file is still not found, and the request path has
-      more than one extension, the second to the last extension is popped off, and the above
-      process repeats.</para>
-
-    <para>This means that for the file <code>test.de.js</code> in the package named
-      <code>mypackage</code> the following files would be tried in this order:</para>
-
-<programlisting>
-mypackage/test.de.js
-mypackage/test.de.min.js
-mypackage/test.de.js.gz
-mypackage/test.de.min.js.gz
-mypackage/test.js
-mypackage/test.min.js
-mypackage/test.js.gz
-mypackage/test.min.js.gz
-</programlisting>
+    <para>In order to support gzipped and/or minified data, the files in a package are
+      loaded using content negotiation logic. A HTTP request for the file <code>test.js</code>
+      in the package named <code>mypackage</code> will return <code>mypackage/test.js</code>
+      or <code>mypackage/test.js.gz</code> (in undefined preference). If neither exists,
+      then it returns <code>mypackage/test.js.min</code> or <code>mypackage/test.js.min.gz</code>
+      (again in undefined preference).</para>
 
     <para>When packages are loaded from a system directory, Cockpit optimizes the file
       system lookups above, by pre-listing the files. This is one of the reasons that

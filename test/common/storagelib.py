@@ -13,7 +13,7 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 import json
 import os.path
@@ -23,12 +23,12 @@ import textwrap
 from testlib import Error, MachineCase, wait
 
 
-def from_udisks_ascii(bytes):
-    return ''.join(map(chr, bytes[:-1]))
+def from_udisks_ascii(codepoints):
+    return ''.join(map(chr, codepoints[:-1]))
 
 
 class StorageHelpers:
-    '''Mix-in class for using in tests that derive from something else than MachineCase or StorageCase'''
+    """Mix-in class for using in tests that derive from something else than MachineCase or StorageCase"""
 
     def inode(self, f):
         return self.machine.execute("stat -L '%s' -c %%i" % f)
@@ -46,199 +46,108 @@ class StorageHelpers:
         self.browser.wait(step)
 
     def add_ram_disk(self, size=50):
-        '''Add per-test RAM disk
+        """Add per-test RAM disk
 
         The disk gets removed automatically when the test ends. This is safe for @nondestructive tests.
 
         Return the device name.
-        '''
+        """
         # sanity test: should not yet be loaded
         self.machine.execute("test ! -e /sys/module/scsi_debug")
         self.machine.execute(f"modprobe scsi_debug dev_size_mb={size}")
-        dev = self.machine.execute('set -e; while true; do O=$(ls /sys/bus/pseudo/drivers/scsi_debug/adapter*/host*/target*/*:*/block 2>/dev/null || true); '
+        dev = self.machine.execute('while true; do O=$(ls /sys/bus/pseudo/drivers/scsi_debug/adapter*/host*/target*/*:*/block 2>/dev/null || true); '
                                    '[ -n "$O" ] && break || sleep 0.1; done; echo "/dev/$O"').strip()
         # don't use addCleanup() here, this is often busy and needs to be cleaned up late; done in MachineCase.nonDestructiveSetup()
 
         return dev
 
     def add_loopback_disk(self, size=50, name=None):
-        '''Add per-test loopback disk
+        """Add per-test loopback disk
 
         The disk gets removed automatically when the test ends. This is safe for @nondestructive tests.
 
-        Unlike add_ram_disk(), this can be called multiple times, and is less size constrained.
-        However, loopback devices look quite special to the OS, so they are not a very good
-        simulation of a "real" disk.
+        Unlike add_ram_disk(), this can be called multiple times, and
+        is less size constrained.  The backing file starts out sparse,
+        so this can be used to create massive block devices, as long
+        as you are careful to not actually use much of it.
+
+        However, loopback devices look quite special to the OS, so
+        they are not a very good simulation of a "real" disk.
 
         Return the device name.
-        '''
+
+        """
         # HACK: https://bugzilla.redhat.com/show_bug.cgi?id=1969408
         # It would be nicer to remove $F immediately after the call to
         # losetup, but that will break some versions of lvm2.
-        dev = self.machine.execute("set -e; F=$(mktemp /var/tmp/loop.XXXX); "
-                                   "dd if=/dev/zero of=$F bs=1000000 count=%s; "
-                                   "losetup --show %s $F" % (size, name if name else "--find")).strip()
+        backf = self.machine.execute("mktemp /var/tmp/loop.XXXX").strip()
+        dev = self.machine.execute(f"truncate --size={size}MB {backf}; "
+                                   f"losetup -P --show {name if name else '--find'} {backf}").strip()
         # If this device had partions in its last incarnation on this
         # machine, they might come back for unknown reasons, in a
         # non-functional state. Running partprobe will get rid of
         # them.
         self.machine.execute("partprobe '%s'" % dev)
         # right after unmounting the device is often still busy, so retry a few times
-        self.addCleanup(self.machine.execute, "umount {0} || true; rm $(losetup -n -O BACK-FILE -l {0}); until losetup -d {0}; do sleep 1; done".format(dev), timeout=10)
+        self.addCleanup(self.machine.execute, f"until losetup -d {dev}; do sleep 1; done; rm {backf}", timeout=10)
+        self.addCleanup(self.machine.execute, f"findmnt -n -o TARGET {dev} | xargs --no-run-if-empty umount;")
+
+        return dev
+
+    def add_targetd_loopback_disk(self, index, size=50):
+        """Add per-test loopback device that can be forcefully removed.
+        """
+
+        m = self.machine
+        model = f"disk{index}"
+        wwn = f"naa.5000{index:012x}"
+
+        m.execute(f"rm -f /var/tmp/targetd.{model}")
+        m.execute(f"targetcli /backstores/fileio create name={model} size={size}M file_or_dev=/var/tmp/targetd.{model}")
+        m.execute(f"targetcli /loopback create {wwn}")
+        m.execute(f"targetcli /loopback/{wwn}/luns create /backstores/fileio/{model}")
+
+        self.addCleanup(m.execute, f"targetcli /loopback delete {wwn}")
+        self.addCleanup(m.execute, f"targetcli /backstores/fileio delete {model}")
+        self.addCleanup(m.execute, f"rm -f /var/tmp/targetd.{model}")
+
+        dev = m.execute(f'for dev in /sys/block/*; do if [ -f $dev/device/model ] && [ "$(cat $dev/device/model | tr -d [:space:])" == "{model}" ]; then echo /dev/$(basename $dev); fi; done').strip()
+        if dev == "":
+            raise Error("Device not found")
         return dev
 
     def force_remove_disk(self, device):
-        '''Act like the given device gets physically removed.
+        """Act like the given device gets physically removed.
 
         This circumvents all the normal EBUSY failures, and thus can be used for testing
         the cleanup after a forceful removal.
-        '''
+        """
         self.machine.execute(f'echo 1 > /sys/block/{os.path.basename(device)}/device/delete')
+        # the removal trips up PCP and our usage graphs
+        self.allow_browser_errors("direct: instance name lookup failed.*")
 
-    def devices_dropdown(self, title):
-        self.browser.click("#devices .pf-c-dropdown button.pf-c-dropdown__toggle")
-        self.browser.click(f"#devices .pf-c-dropdown a:contains('{title}')")
+    def addCleanupVG(self, vgname):
+        """Ensure the given VG is removed after the test"""
 
-    # Content
+        self.addCleanup(self.machine.execute, f"if [ -d /dev/{vgname} ]; then vgremove --force {vgname}; fi")
 
-    def content_row_tbody(self, index):
-        return "#detail-content > article > div > table > tbody:nth-of-type(%d)" % index
-
-    def content_row_expand(self, index):
-        b = self.browser
-        tbody = self.content_row_tbody(index)
-        b.wait_visible(tbody)
-        if "pf-m-expanded" not in (b.attr(tbody, "class") or ""):
-            b.click(tbody + " tr td.pf-c-table__toggle button")
-            b.wait_visible(tbody + ".pf-m-expanded")
-
-    def content_row_action(self, index, title, isExpandable=True):
-        if isExpandable:
-            btn = self.content_row_tbody(index) + f" tr:first-child td button:contains({title})"
-        else:
-            btn = "#detail-content > article > div > table > :nth-child(%d)" % index + f" td button:contains({title})"
-        self.browser.click(btn)
-
-    # The row might come and go a couple of times until it has the
-    # expected content.  However, wait_in_text can not deal with a
-    # temporarily disappearing element, so we use self.retry.
-
-    def content_row_wait_in_col(self, row_index, col_index, val, isExpandable=True, alternate_val=None):
-        if isExpandable:
-            col = self.content_row_tbody(row_index) + " tr:first-child > :nth-child(%d)" % (col_index + 1)
-        else:
-            col = "#detail-content > article > div > table > :nth-child(%d)" % row_index + " > :nth-child(%d)" % (col_index + 1)
-        wait(lambda: self.browser.is_present(col) and (val in self.browser.text(col) or (alternate_val and alternate_val in self.browser.text(col))))
-
-    def content_dropdown_action(self, index, title, isExpandable=True):
-        if isExpandable:
-            dropdown = self.content_row_tbody(index) + " tr td:last-child .pf-c-dropdown"
-        else:
-            dropdown = "#detail-content > article > div > table > :nth-child(%d)" % index + " td:last-child .pf-c-dropdown"
-        self.browser.click(dropdown + " button.pf-c-dropdown__toggle")
-        self.browser.click(dropdown + f" a:contains('{title}')")
-
-    def content_tab_expand(self, row_index, tab_index):
-        tab_btn = self.content_row_tbody(row_index) + " .pf-c-tabs ul li:nth-child(%d) button" % tab_index
-        tab = self.content_row_tbody(row_index) + " .ct-listing-panel-body[data-key=%d]" % (tab_index - 1)
-        self.content_row_expand(row_index)
-        self.browser.click(tab_btn)
-        self.browser.wait_visible(tab)
-        return tab
-
-    def content_tab_action(self, row_index, tab_index, title):
-        tab = self.content_tab_expand(row_index, tab_index)
-        btn = tab + f" button:contains({title})"
-        self.browser.wait_attr(btn, "disabled", None)
-        self.browser.click(btn)
-
-    def wait_content_tab_action_disabled(self, row_index, tab_index, title):
-        tab = self.content_tab_expand(row_index, tab_index)
-        btn = tab + f" button:disabled:contains({title})"
-        self.browser.wait_visible(btn)
-
-    # To check what's in a tab, we need to open the row and select the
-    # tab.
-    #
-    # However, sometimes we open the wrong row or the wrong tab
-    # because the right row or right tab still has to be created and
-    # take its right place.  If the right row or tab finally appears,
-    # it won't be open at that point and we will miss it if we only
-    # open a row/tab once.  So we just run the whole process in a big
-    # retry loop.
-    #
-    # XXX - Clicking a button in a tab has the same problem, but we
-    # ignore that for now.
-
-    def content_tab_wait_in_info(self, row_index, tab_index, title, val=None, alternate_val=None, cond=None):
-        b = self.browser
-
-        def setup():
-            pass
-
-        def check():
-            row = self.content_row_tbody(row_index)
-            row_item = row + " tr td.pf-c-table__toggle button"
-            tab_btn = row + " .pf-c-tabs ul li:nth-child(%d) button" % tab_index
-            tab = row + " .ct-listing-panel-body[data-key=%d]" % (tab_index - 1)
-            cell = tab + f" dt:contains({title}) + *"
-
-            # The DOM might change at any time while we are inspecting
-            # it, so we can't reliably test for a elements existence
-            # before clicking on it, for example.  Instead, we just
-            # click and catch the testlib.Error that happens when it
-            # is not there.  However, the click itself will wait for a
-            # timeout when the element is missing, so we check anyway
-            # before trying, just to speed things up.
-
-            try:
-                if not b.is_present(row + ".pf-m-expanded"):
-                    if not b.is_present(row_item):
-                        return False
-                    b.click(row_item)
-                    if not b.is_present(row + ".pf-m-expanded"):
-                        return False
-
-                if not b.is_present(tab) or not b.is_visible(tab):
-                    if not b.is_present(tab_btn):
-                        return False
-                    b.click(tab_btn)
-                    if not b.is_visible(tab):
-                        return False
-
-                if not b.is_present(cell) or not b.is_visible(cell):
-                    return False
-
-                if val is not None and val in b.text(cell):
-                    return True
-                if alternate_val is not None and alternate_val in b.text(cell):
-                    return True
-                if cond is not None and cond(cell):
-                    return True
-                return False
-            except Error:
-                return False
-
-        def teardown():
-            pass
-        self.retry(setup, check, teardown)
-
-    def content_tab_info_label(self, row_index, tab_index, title):
-        tab = self.content_tab_expand(row_index, tab_index)
-        return tab + f" dt:contains({title})"
-
-    def content_tab_info_action(self, row_index, tab_index, title):
-        label = self.content_tab_info_label(row_index, tab_index, title)
-        link = label + " + dd button.pf-m-link"
-        self.browser.click(link)
+    def addCleanupMount(self, mount_point):
+        self.addCleanup(self.machine.execute,
+                        f"if mountpoint -q {mount_point}; then umount {mount_point}; fi")
 
     # Dialogs
 
     def dialog_wait_open(self):
         self.browser.wait_visible('#dialog')
 
-    def dialog_wait_alert(self, text):
-        self.browser.wait_in_text('#dialog .pf-c-alert__title', text)
+    def dialog_wait_alert(self, text1, text2=None):
+        def has_alert_title():
+            t = self.browser.text('#dialog .pf-v5-c-alert__title')
+            return text1 in t or (text2 is not None and text2 in t)
+        self.browser.wait(has_alert_title)
+
+    def dialog_wait_title(self, text):
+        self.browser.wait_in_text('#dialog .pf-v5-c-modal-box__title', text)
 
     def dialog_field(self, field):
         return f'#dialog [data-field="{field}"]'
@@ -265,9 +174,10 @@ class StorageHelpers:
             for label in val:
                 self.browser.set_checked(f'{sel} :contains("{label}") input', val)
         elif ftype == "size-slider":
-            self.browser.set_val(sel + " .size-unit", "1000000")
-            self.browser.set_input_text(sel + " .size-text", str(val))
+            self.browser.set_val(sel + " .size-unit select", "1000000")
+            self.browser.set_input_text(sel + " .size-text input", str(val))
         elif ftype == "select":
+            self.browser._wait_present(sel + f" select option[value='{val}']:not([disabled])")
             self.browser.set_val(sel + " select", val)
         elif ftype == "select-radio":
             self.browser.click(sel + f" input[data-data='{val}']")
@@ -275,13 +185,13 @@ class StorageHelpers:
             self.browser.set_input_text(sel, val)
         elif ftype == "text-input-checked":
             if not val:
-                self.browser.set_checked(sel + " input[type=checkbox]", False)
+                self.browser.set_checked(sel + " input[type=checkbox]", val=False)
             else:
-                self.browser.set_checked(sel + " input[type=checkbox]", True)
+                self.browser.set_checked(sel + " input[type=checkbox]", val=True)
                 self.browser.set_input_text(sel + " [type=text]", val)
         elif ftype == "combobox":
-            self.browser.click(sel + " button.pf-c-select__toggle-button")
-            self.browser.click(sel + f" .pf-c-select__menu li:contains('{val}') button")
+            self.browser.click(sel + " button.pf-v5-c-menu-toggle__button")
+            self.browser.click(sel + f" .pf-v5-c-menu li:contains('{val}') button")
         else:
             self.browser.set_val(sel, val)
 
@@ -304,22 +214,27 @@ class StorageHelpers:
         sel = self.dialog_field(field)
         ftype = self.browser.attr(sel, "data-field-type")
         if ftype == "size-slider":
-            self.browser.wait_val(sel + " .size-unit", unit)
-            self.browser.wait_val(sel + " .size-text", str(val))
+            self.browser.wait_val(sel + " .size-unit select", unit)
+            self.browser.wait_val(sel + " .size-text input", str(val))
         elif ftype == "select":
             self.browser.wait_attr(sel, "data-value", val)
+        elif ftype == "checkbox":
+            self.browser.wait_visible(sel + (":checked" if val else ":not(:checked)"))
         else:
             self.browser.wait_val(sel, val)
 
     def dialog_wait_error(self, field, val):
         # XXX - allow for more than one error
-        self.browser.wait_in_text('#dialog .pf-c-form__helper-text.pf-m-error', val)
+        self.browser.wait_in_text('#dialog .pf-v5-c-form__helper-text .pf-m-error', val)
 
     def dialog_wait_not_present(self, field):
         self.browser.wait_not_present(self.dialog_field(field))
 
     def dialog_wait_apply_enabled(self):
         self.browser.wait_attr('#dialog button.apply:nth-of-type(1)', "disabled", None)
+
+    def dialog_wait_apply_disabled(self):
+        self.browser.wait_visible('#dialog button.apply:nth-of-type(1)[disabled]')
 
     def dialog_apply(self):
         self.browser.click('#dialog button.apply:nth-of-type(1)')
@@ -332,7 +247,7 @@ class StorageHelpers:
 
     def dialog_wait_close(self):
         # file system operations often take longer than 10s
-        with self.browser.wait_timeout(max(self.browser.cdp.timeout, 60)):
+        with self.browser.wait_timeout(max(self.browser.timeout, 60)):
             self.browser.wait_not_present('#dialog')
 
     def dialog_check(self, expect):
@@ -363,7 +278,9 @@ class StorageHelpers:
             else:
                 raise last_error
 
-    def dialog(self, values, expect={}, secondary=False):
+    def dialog(self, values, expect=None, secondary=False):
+        if expect is None:
+            expect = {}
         self.dialog_wait_open()
         for f in expect:
             self.dialog_wait_val(f, expect[f])
@@ -428,6 +345,35 @@ class StorageHelpers:
             self.dialog_cancel()
         self.dialog_wait_close()
 
+    def dialog_with_error_retry(self, trigger, errors, values=None, first_setup=None, retry_setup=None, setup=None):
+        def doit():
+            nonlocal first_setup
+            trigger()
+            self.dialog_wait_open()
+            if values:
+                self.dialog_set_vals(values)
+            if first_setup:
+                first_setup()
+                first_setup = None
+            elif retry_setup:
+                retry_setup()
+            elif setup:
+                setup()
+            self.dialog_apply()
+            try:
+                self.dialog_wait_close()
+                return True
+            except Exception:
+                dialog_text = self.browser.text('#dialog .pf-v5-c-alert__title')
+                for err in errors:
+                    if err in dialog_text:
+                        print("WARNING: retrying dialog")
+                        self.dialog_cancel()
+                        self.dialog_wait_close()
+                        return False
+                raise
+        self.browser.wait(doit)
+
     def udisks_objects(self):
         return json.loads(self.machine.execute(["python3", "-c", textwrap.dedent("""
             import dbus, json
@@ -438,10 +384,10 @@ class StorageHelpers:
                 "GetManagedObjects", "", [])))""")]))
 
     def configuration_field(self, dev, tab, field):
-        all = self.udisks_objects()
-        for path in all:
-            if "org.freedesktop.UDisks2.Block" in all[path]:
-                iface = all[path]["org.freedesktop.UDisks2.Block"]
+        managerObjects = self.udisks_objects()
+        for path in managerObjects:
+            if "org.freedesktop.UDisks2.Block" in managerObjects[path]:
+                iface = managerObjects[path]["org.freedesktop.UDisks2.Block"]
                 if from_udisks_ascii(iface["Device"]) == dev or from_udisks_ascii(iface["PreferredDevice"]) == dev:
                     for entry in iface["Configuration"]:
                         if entry[0] == tab:
@@ -457,11 +403,11 @@ class StorageHelpers:
         self.assertNotIn(text, self.configuration_field(dev, tab, field))
 
     def child_configuration_field(self, dev, tab, field):
-        all = self.udisks_objects()
-        for path in all:
-            if "org.freedesktop.UDisks2.Encrypted" in all[path]:
-                block_iface = all[path]["org.freedesktop.UDisks2.Block"]
-                crypto_iface = all[path]["org.freedesktop.UDisks2.Encrypted"]
+        udisks_objects = self.udisks_objects()
+        for path in udisks_objects:
+            if "org.freedesktop.UDisks2.Encrypted" in udisks_objects[path]:
+                block_iface = udisks_objects[path]["org.freedesktop.UDisks2.Block"]
+                crypto_iface = udisks_objects[path]["org.freedesktop.UDisks2.Encrypted"]
                 if from_udisks_ascii(block_iface["Device"]) == dev or from_udisks_ascii(block_iface["PreferredDevice"]) == dev:
                     for entry in crypto_iface["ChildConfiguration"]:
                         if entry[0] == tab:
@@ -475,10 +421,10 @@ class StorageHelpers:
         self.assertIn(text, self.child_configuration_field(dev, tab, field))
 
     def lvol_child_configuration_field(self, lvol, tab, field):
-        all = self.udisks_objects()
-        for path in all:
-            if "org.freedesktop.UDisks2.LogicalVolume" in all[path]:
-                iface = all[path]["org.freedesktop.UDisks2.LogicalVolume"]
+        udisk_objects = self.udisks_objects()
+        for path in udisk_objects:
+            if "org.freedesktop.UDisks2.LogicalVolume" in udisk_objects[path]:
+                iface = udisk_objects[path]["org.freedesktop.UDisks2.LogicalVolume"]
                 if iface["Name"] == lvol:
                     for entry in iface["ChildConfiguration"]:
                         if entry[0] == tab:
@@ -490,16 +436,6 @@ class StorageHelpers:
 
     def assert_in_lvol_child_configuration(self, lvol, tab, field, text):
         self.assertIn(text, self.lvol_child_configuration_field(lvol, tab, field))
-
-    def wait_mounted(self, row, col):
-        with self.browser.wait_timeout(30):
-            self.content_tab_wait_in_info(row, col, "Mount point",
-                                          cond=lambda cell: "The filesystem is not mounted" not in self.browser.text(cell))
-
-    def wait_not_mounted(self, row, col):
-        with self.browser.wait_timeout(30):
-            self.content_tab_wait_in_info(row, col, "Mount point",
-                                          cond=lambda cell: "The filesystem is not mounted" in self.browser.text(cell))
 
     def setup_systemd_password_agent(self, password):
         # This sets up a systemd password agent that replies to all
@@ -552,11 +488,14 @@ MakeDirectory=yes
         # the initrd is regenerated again from within the new root.
 
         self.setup_systemd_password_agent(passphrase)
+        install_items = [
+            '/etc/systemd/system/sysinit.target.wants/test-password-agent.path',
+            '/etc/systemd/system/test-password-agent.path',
+            '/etc/systemd/system/test-password-agent.service',
+            '/usr/local/bin/test-password-agent',
+        ]
         m.write("/etc/dracut.conf.d/01-askpass.conf",
-                'install_items+=" /usr/local/bin/test-password-agent ' +
-                '/etc/systemd/system/test-password-agent.service ' +
-                '/etc/systemd/system/test-password-agent.path ' +
-                '/etc/systemd/system/sysinit.target.wants/test-password-agent.path "')
+                f'install_items+=" {" ".join(install_items)} "')
 
         # The first step is to move /boot to a new unencrypted
         # partition on the new disk but keep it mounted at /boot.
@@ -564,7 +503,7 @@ MakeDirectory=yes
         # which will look at /boot and do the right thing.
         #
         # Then we copy (most of) the old root to the new disk, into a
-        # LUKS container.
+        # logical volume sitting on top of a LUKS container.
         #
         # The kernel command line is changed to use the new root
         # filesystem, and grub is installed on the new disk. The boot
@@ -579,7 +518,7 @@ MakeDirectory=yes
         # Before the reboot, we destroy the original disk to make
         # really sure that it wont be used anymore.
 
-        info = m.add_disk("4G", serial="NEWROOT", boot_disk=True)
+        info = m.add_disk("6G", serial="NEWROOT", boot_disk=True)
         dev = "/dev/" + info["dev"]
         wait(lambda: m.execute(f"test -b {dev} && echo present").strip() == "present")
         m.execute(f"""
@@ -588,23 +527,33 @@ parted -s {dev} mktable msdos
 parted -s {dev} mkpart primary ext4 1M 500M
 parted -s {dev} mkpart primary ext4 500M 100%
 echo {passphrase} | cryptsetup luksFormat --pbkdf-memory=300 {dev}2
-echo {passphrase} | cryptsetup luksOpen --pbkdf-memory=300 {dev}2 dm-test
 luks_uuid=$(blkid -p {dev}2 -s UUID -o value)
-mkfs.ext4 /dev/mapper/dm-test
+echo {passphrase} | cryptsetup luksOpen --pbkdf-memory=300 {dev}2 luks-$luks_uuid
+vgcreate root /dev/mapper/luks-$luks_uuid
+lvcreate root -n root -l100%VG
+mkfs.ext4 /dev/root/root
 mkdir /new-root
-mount /dev/mapper/dm-test /new-root
+mount /dev/root/root /new-root
 mkfs.ext4 {dev}1
+# don't move the EFI partition
+if mountpoint /boot/efi; then umount /boot/efi; fi
 mkdir /new-root/boot
 mount {dev}1 /new-root/boot
 tar --selinux --one-file-system -cf - --exclude /boot --exclude='/var/tmp/*' --exclude='/var/cache/*' \
     --exclude='/var/lib/mock/*' --exclude='/var/lib/containers/*' --exclude='/new-root/*' \
     / | tar --selinux -C /new-root -xf -
+# latest Fedora have /var on a separate subvolume
+if mountpoint /var; then
+    tar -C /var --selinux --one-file-system -cf - --exclude='tmp/*' --exclude='cache/*' \
+        --exclude='lib/mock/*' --exclude='lib/containers/*' \
+        . | tar --selinux -C /new-root/var -xf -
+fi
 tar --one-file-system -C /boot -cf - . | tar -C /new-root/boot -xf -
 umount /new-root/boot
 mount {dev}1 /boot
 echo "(hd0) {dev}" >/boot/grub2/device.map
 sed -i -e 's,/boot/,/,' /boot/loader/entries/*
-uuid=$(blkid -p /dev/mapper/dm-test -s UUID -o value)
+uuid=$(blkid -p /dev/root/root -s UUID -o value)
 buuid=$(blkid -p {dev}1 -s UUID -o value)
 echo "UUID=$uuid / auto defaults 0 0" >/new-root/etc/fstab
 echo "UUID=$buuid /boot auto defaults 0 0" >>/new-root/etc/fstab
@@ -617,26 +566,101 @@ grub2-install {dev}
   mv /boot/loader/entries.stowed /boot/loader/entries
   ! test -f /etc/kernel/cmdline.stowed || mv /etc/kernel/cmdline.stowed /etc/kernel/cmdline
 )
-grubby --update-kernel=ALL --args="root=UUID=$uuid rootflags=defaults rd.luks.uuid=$luks_uuid"
+grubby --update-kernel=ALL --args="root=UUID=$uuid rootflags=defaults rd.luks.uuid=$luks_uuid rd.lvm.lv=root/root"
 ! test -f /etc/kernel/cmdline || cp /etc/kernel/cmdline /new-root/etc/kernel/cmdline
 """, timeout=300)
-        luks_uuid = m.execute(f"blkid -p {dev}2 -s UUID -o value").strip()
-        m.spawn("dd if=/dev/zero of=/dev/vda bs=1M count=100; reboot", "reboot", check=False)
-        m.wait_reboot(300)
-        self.assertEqual(m.execute("findmnt -n -o SOURCE /").strip(), f"/dev/mapper/luks-{luks_uuid}")
+        # destroy bootability of the current root partition, just to make sure
+        m.execute("rm -rf /etc/*")
+        m.reboot()
+        self.assertEqual(m.execute("findmnt -n -o SOURCE /").strip(), "/dev/mapper/root-root")
+
+    # Cards and tables
+
+    def card(self, title):
+        return f"[data-test-card-title='{title}']"
+
+    def card_parent_link(self):
+        return ".pf-v5-c-breadcrumb__item:nth-last-child(2) > a"
+
+    def card_header(self, title):
+        return self.card(title) + " .pf-v5-c-card__header"
+
+    def card_row(self, title, index=None, name=None, location=None):
+        if index is not None:
+            return self.card(title) + f" tbody tr:nth-child({index})"
+        elif name is not None:
+            name = name.replace("/dev/", "")
+            return self.card(title) + f" tbody [data-test-row-name='{name}']"
+        else:
+            return self.card(title) + f" tbody [data-test-row-location='{location}']"
+
+    def click_card_row(self, title, index=None, name=None, location=None):
+        # We need to click on a <td> element since that's where the handlers are...
+        self.browser.click(self.card_row(title, index, name, location) + " td:nth-child(1)")
+
+    def card_row_col(self, title, row_index=None, col_index=None, row_name=None, row_location=None):
+        return self.card_row(title, row_index, row_name, row_location) + f" td:nth-child({col_index})"
+
+    def card_desc(self, card_title, desc_title):
+        return self.card(card_title) + f" [data-test-desc-title='{desc_title}'] [data-test-value=true]"
+
+    def card_desc_action(self, card_title, desc_title):
+        return self.card(card_title) + f" [data-test-desc-title='{desc_title}'] [data-test-action=true] button"
+
+    def card_button(self, card_title, button_title):
+        return self.card(card_title) + f" button:contains('{button_title}')"
+
+    def dropdown_toggle(self, parent):
+        return parent + " .pf-v5-c-menu-toggle"
+
+    def dropdown_action(self, parent, title):
+        return parent + f" .pf-v5-c-menu button:contains('{title}')"
+
+    def dropdown_description(self, parent, title):
+        return parent + f" .pf-v5-c-menu button:contains('{title}') .pf-v5-c-menu__item-description"
+
+    def click_dropdown(self, parent, title):
+        self.browser.click(self.dropdown_toggle(parent))
+        self.browser.click(self.dropdown_action(parent, title))
+
+    def click_card_dropdown(self, card_title, button_title):
+        self.click_dropdown(self.card_header(card_title), button_title)
+
+    def click_devices_dropdown(self, title):
+        self.click_card_dropdown("Storage", title)
+
+    def check_dropdown_action_disabled(self, parent, title, expected_text):
+        self.browser.click(self.dropdown_toggle(parent))
+        self.browser.wait_visible(self.dropdown_action(parent, title) + "[disabled]")
+        self.browser.wait_text(self.dropdown_description(parent, title), expected_text)
+        self.browser.click(self.dropdown_toggle(parent))
+
+    def wait_mounted(self, card_title):
+        with self.browser.wait_timeout(30):
+            self.browser.wait_not_in_text(self.card_desc(card_title, "Mount point"),
+                                          "The filesystem is not mounted.")
+
+    def wait_not_mounted(self, card_title):
+        with self.browser.wait_timeout(30):
+            self.browser.wait_in_text(self.card_desc(card_title, "Mount point"),
+                                      "The filesystem is not mounted.")
+
+    def wait_card_button_disabled(self, card_title, button_title):
+        with self.browser.wait_timeout(30):
+            self.browser.wait_visible(self.card_button(card_title, button_title) + ":disabled")
 
 
 class StorageCase(MachineCase, StorageHelpers):
 
     def setUp(self):
 
-        if self.image in ["fedora-coreos", "rhel4edge"]:
+        if self.image == "fedora-coreos":
             self.skipTest("No udisks/cockpit-storaged on OSTree images")
 
         super().setUp()
 
         ver = self.machine.execute("busctl --system get-property org.freedesktop.UDisks2 /org/freedesktop/UDisks2/Manager org.freedesktop.UDisks2.Manager Version || true")
-        m = re.match('s "(.*)"', ver)
+        m = re.match(r's "(.*)"', ver)
         if m:
             self.storaged_version = list(map(int, m.group(1).split(".")))
         else:
@@ -648,9 +672,14 @@ class StorageCase(MachineCase, StorageHelpers):
         else:
             self.default_crypto_type = "luks1"
 
-        if self.image.startswith("rhel-8") or self.image.startswith("centos-8"):
+        if self.image.startswith("rhel-8"):
             # HACK: missing /etc/crypttab file upsets udisks: https://github.com/storaged-project/udisks/pull/835
             self.machine.write("/etc/crypttab", "")
 
         # starting out with empty PCP logs and pmlogger not running causes these metrics channel messages
         self.allow_journal_messages("pcp-archive: no such metric: disk.*")
+
+        # UDisks2 invalidates the Size property and cockpit-bridge
+        # gets it immediately.  But sometimes the interface is already
+        # gone.
+        self.allow_journal_messages("org.freedesktop.UDisks2: couldn't get property org.freedesktop.UDisks2.Filesystem Size .* No such interface.*")

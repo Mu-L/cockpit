@@ -14,24 +14,22 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
 
 import React from "react";
-import { Alert, AlertActionCloseButton } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
-import { AlertGroup } from "@patternfly/react-core/dist/esm/components/AlertGroup/index.js";
+import { Alert, AlertActionCloseButton, AlertGroup } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
 import { Badge } from "@patternfly/react-core/dist/esm/components/Badge/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Divider } from "@patternfly/react-core/dist/esm/components/Divider/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { ExpandableSection } from "@patternfly/react-core/dist/esm/components/ExpandableSection/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Switch } from "@patternfly/react-core/dist/esm/components/Switch/index.js";
 import { Stack, StackItem } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
-import { Text, TextVariants } from "@patternfly/react-core/dist/esm/components/Text/index.js";
 import { TextArea } from "@patternfly/react-core/dist/esm/components/TextArea/index.js";
 import { ExclamationCircleIcon, ExclamationTriangleIcon, InfoCircleIcon } from "@patternfly/react-icons";
 
@@ -122,7 +120,7 @@ class SELinuxEventDetails extends React.Component {
 
             // One line usually means one command
             if (itm.doText && itm.doText.indexOf("\n") < 0)
-                doElement = <TextArea aria-label={_("solution")} isReadOnly defaultValue={itm.doText} />;
+                doElement = <TextArea aria-label={_("solution")} readOnlyVariant="default" defaultValue={itm.doText} />;
 
             // There can be text with commands. Command always starts on a new line with '#'
             // Group subsequent commands into one `<TextArea>` element.
@@ -133,7 +131,7 @@ class SELinuxEventDetails extends React.Component {
                 lines.forEach(l => {
                     if (l[0] == "#") { // command
                         if (lastCommand) // When appending command remove "# ". Only the first command keeps it and it is removed later on
-                            parts[parts.length - 1] += ("\n" + l.substr(2));
+                            parts[parts.length - 1] += ("\n" + l.substring(2));
                         else
                             parts.push(l);
                         lastCommand = true;
@@ -144,9 +142,9 @@ class SELinuxEventDetails extends React.Component {
                 });
                 doElement = parts.map((p, index) => p[0] == "#"
                     ? <TextArea aria-label={_("solution")}
-                                isReadOnly
+                                readOnlyVariant="plain"
                                 key={p}
-                                defaultValue={p.substr(2)} />
+                                defaultValue={p.substring(2)} />
                     : <span key={p}>{p}</span>);
             }
 
@@ -258,11 +256,10 @@ class SELinuxStatus extends React.Component {
 
         return (
             <Stack hasGutter className="selinux-policy-ct">
-                <Flex alignItems={{ default: 'alignItemsCenter' }}>
+                <Flex spaceItems={{ default: 'spaceItemsMd' }} alignItems={{ default: 'alignItemsCenter' }}>
                     <h2>{_("SELinux policy")}</h2>
                     <Switch isChecked={this.props.selinuxStatus.enforcing}
                             label={_("Enforcing")}
-                            labelOff={_("Permissive")}
                             onChange={this.props.changeSelinuxMode} />
                 </Flex>
                 { note !== null &&
@@ -363,16 +360,16 @@ export class SETroubleshootPage extends React.Component {
                 ];
                 // if the alert has level "red", it's critical
                 const criticalAlert = (itm.details && 'level' in itm.details && itm.details.level == "red")
-                    ? <ExclamationTriangleIcon className="ct-icon-exclamation-triangle" size="md" />
+                    ? <ExclamationTriangleIcon className="ct-icon-exclamation-triangle pf-v5-c-icon pf-m-lg" />
                     : null;
                 const columns = [
                     { title: criticalAlert },
                     { title: itm.description }
                 ];
                 if (itm.count > 1) {
-                    columns.push({ title: <Badge isRead>{itm.count}</Badge>, props: { className: "pf-c-table__action" } });
+                    columns.push({ title: <Badge isRead>{itm.count}</Badge>, props: { className: "pf-v5-c-table__action" } });
                 } else {
-                    columns.push({ title: <span />, props: { className: "pf-c-table__action" } });
+                    columns.push({ title: <span />, props: { className: "pf-v5-c-table__action" } });
                 }
                 return ({
                     props: { key: itm.details ? itm.details.localId : index },
@@ -391,20 +388,20 @@ export class SETroubleshootPage extends React.Component {
                 if (this.state.selected[k])
                     this.props.deleteAlert(k).then(() => this.setState(prevState => ({ selected: { ...prevState.selected, [k]: false } })));
         };
+        const actions = (
+            !emptyState
+                ? <Button className="selinux-alert-dismiss"
+                variant="danger"
+                onClick={onDeleteClick}
+                isDisabled={ !this.props.deleteAlert || !selectedCnt}>
+                    {selectedCnt ? cockpit.format(cockpit.ngettext("Dismiss $0 alert", "Dismiss $0 alerts", selectedCnt), selectedCnt) : _("Dismiss selected alerts")}
+                </Button>
+                : null
+        );
         const troubleshooting = (
             <Card>
-                <CardHeader>
-                    <CardTitle><Text component={TextVariants.h2}>{title}</Text></CardTitle>
-                    {!emptyState
-                        ? <CardActions>
-                            <Button className="selinux-alert-dismiss"
-                                variant="danger"
-                                onClick={onDeleteClick}
-                                isDisabled={ !this.props.deleteAlert || !selectedCnt}>
-                                {selectedCnt ? cockpit.format(cockpit.ngettext("Dismiss $0 alert", "Dismiss $0 alerts", selectedCnt), selectedCnt) : _("Dismiss selected alerts")}
-                            </Button>
-                        </CardActions>
-                        : null}
+                <CardHeader actions={{ actions }}>
+                    <CardTitle component="h2">{title}</CardTitle>
                 </CardHeader>
                 <CardBody className="contains-list">
                     {!emptyState
@@ -429,7 +426,7 @@ export class SETroubleshootPage extends React.Component {
                 shell={ "semanage import <<EOF\n" + this.props.selinuxStatus.shell.trim() + "\nEOF" }
                 ansible={ this.props.selinuxStatus.ansible }
                 entries={ this.props.selinuxStatus.modifications }
-                failed={ this.props.selinuxStatus.failed }
+                failed={this.props.selinuxStatus.failed ? _("Error running semanage to discover system modifications") : null}
             />
         );
 

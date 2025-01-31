@@ -5,8 +5,8 @@ body.login-pf {
 }
 
 #badge {
-    width: 220px;
-    height: 80px;
+    inline-size: 220px;
+    block-size: 80px;
     background-image: url("logo.png");
     background-size: contain;
     background-repeat: no-repeat;
@@ -17,14 +17,6 @@ body.login-pf {
     text-transform: uppercase;
 }
 
-#brand:before {
+#brand::before {
     content: "${PRETTY_NAME}";
-}
-
-#index-brand {
-    content: "${NAME}";
-}
-
-#index-brand:before {
-    content: "${NAME}";
 }

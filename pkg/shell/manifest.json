@@ -23,8 +23,15 @@
         "sv-se": "svenska",
         "tr-tr": "Türkçe",
         "uk-ua": "Українська",
-        "zh-cn": "中文（中国）"
+        "zh-cn": "中文（中国）",
+        "zh-tw": "中文（台灣）"
     },
+    "docs": [
+        {
+            "label": "Web Console",
+            "url": "https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/managing_systems_using_the_rhel_9_web_console/index"
+        }
+    ],
     "bridges": [
         {
             "privileged": true,

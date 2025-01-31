@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React from "react";
@@ -25,4 +25,9 @@ import { FileAutoComplete } from "cockpit-components-file-autocomplete.jsx";
 export function showFileAcDemo(rootElement) {
     const root = createRoot(rootElement);
     root.render(<FileAutoComplete id='file-autocomplete-widget' />);
+}
+
+export function showFileAcDemoPreselected(rootElement) {
+    const root = createRoot(rootElement);
+    root.render(<FileAutoComplete id='file-autocomplete-widget-preselected' value="/home/admin/newdir/file1" />);
 }

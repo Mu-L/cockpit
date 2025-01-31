@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,20 +15,17 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from netlib import NetworkCase
-from testlib import skipDistroPackage, test_main, wait
-
+import netlib
+import testlib
 from lib.constants import TEST_OS_DEFAULT
 
 
-@skipDistroPackage()
-class TestNetworkingSettings(NetworkCase):
+class TestNetworkingSettings(netlib.NetworkCase):
     provision = {
         "machine1": {"memory_mb": 512},
-        "machine2": {"image": TEST_OS_DEFAULT, "address": "10.111.113.2/20", "dhcp": True, "memory_mb": 256}
+        "machine2": {"image": TEST_OS_DEFAULT, "address": "10.111.113.2/20", "dhcp": True, "memory_mb": 512}
     }
 
     def testNoConnectionSettings(self):
@@ -65,12 +62,12 @@ class TestNetworkingSettings(NetworkCase):
                              value)
 
         # Check that we now have connection settings
-        con_id = wait(lambda: self.iface_con_id(iface))
+        con_id = testlib.wait(lambda: self.iface_con_id(iface))
         assert_connection_setting(con_id, "ipv4.method", "manual")
 
         # The interface will be activated. Deactivate it.
         self.wait_for_iface_setting('Status', '1.2.3.4/24')
-        self.toggle_onoff(f".pf-c-card__header:contains('{iface}')")
+        self.toggle_onoff(f".pf-v5-c-card__header:contains('{iface}')")
         self.wait_for_iface_setting('Status', 'Inactive')
 
         # Delete the connection settings again and wait for the ghost
@@ -79,11 +76,11 @@ class TestNetworkingSettings(NetworkCase):
         self.wait_for_iface_setting('IPv4', 'Automatic')
 
         # Activate with ghost settings
-        self.toggle_onoff(f".pf-c-card__header:contains('{iface}')")
+        self.toggle_onoff(f".pf-v5-c-card__header:contains('{iface}')")
         self.wait_for_iface_setting('Status', '10.111.')
 
         # Check again that we now have connection settings
-        con_id = wait(lambda: self.iface_con_id(iface))
+        con_id = testlib.wait(lambda: self.iface_con_id(iface))
         assert_connection_setting(con_id, "ipv4.method", "auto")
 
         # Change some more settins and check that the actual config
@@ -91,9 +88,9 @@ class TestNetworkingSettings(NetworkCase):
 
         self.configure_iface_setting('IPv4')
         b.wait_visible("#network-ip-settings-dialog")
-        self.wait_onoff("[data-field=dns]", True)
+        self.wait_onoff("[data-field=dns]", val=True)
         self.toggle_onoff("[data-field=dns]")
-        self.wait_onoff("[data-field=dns_search]", False)
+        self.wait_onoff("[data-field=dns_search]", val=False)
         b.click("#network-ip-settings-dns-add")
         b.set_input_text("#network-ip-settings-dns-server-0", "1.2.3.4")
         b.click("#network-ip-settings-dns-search-add")
@@ -106,8 +103,8 @@ class TestNetworkingSettings(NetworkCase):
         assert_connection_setting(con_id, "ipv4.dns-search", "foo.com")
 
         self.configure_iface_setting('IPv4')
-        self.wait_onoff("[data-field=dns]", False)
-        self.wait_onoff("[data-field=dns_search]", False)
+        self.wait_onoff("[data-field=dns]", val=False)
+        self.wait_onoff("[data-field=dns_search]", val=False)
         b.wait_val("#network-ip-settings-dns-server-0", "1.2.3.4")
         b.wait_val("#network-ip-settings-search-domain-0", "foo.com")
         b.click("#network-ip-settings-cancel")
@@ -120,6 +117,39 @@ class TestNetworkingSettings(NetworkCase):
         b.wait_not_present("#network-ip-settings-dialog")
 
         assert_connection_setting(con_id, "ipv6.method", "disabled")
+
+        # Open the dialog, expand all the fields and assert pixels
+        self.configure_iface_setting("IPv4")
+        b.click("#network-ip-settings-address-add")
+        b.click("#network-ip-settings-route-add")
+        b.click("#network-ip-settings-dns-add")
+        b.click("#network-ip-settings-dns-search-add")
+        b.assert_pixels("#network-ip-settings-dialog", "network-ip-settings-dialog")
+
+        # Check that IPv4/IPv6 settings dialogs only show the supported IP methods for wireguard
+        # Skip images without the wireguard-tools package
+        if m.image not in ["centos-10"] and not m.image.startswith("rhel-8"):
+            b.go("/network")
+            b.click("#networking-add-wg")
+            b.set_input_text("#network-wireguard-settings-addresses-input", "1.2.3.4/24")
+            wg_iface = b.val("#network-wireguard-settings-interface-name-input")
+            b.click("#network-wireguard-settings-save")
+            self.select_iface(wg_iface)
+            self.configure_iface_setting("IPv4")
+            b._wait_present("#network-ip-settings-select-method option[value='manual']")
+            b._wait_present("#network-ip-settings-select-method option[value='disabled']")
+            unsupported_ip4_methods = ['auto', 'dhcp', 'link-local', 'ignore', 'shared']
+            for method in unsupported_ip4_methods:
+                b.wait_not_present(f"#network-ip-settings-select-method option[value='{method}']")
+            b.click("#network-ip-settings-cancel")
+            b.wait_not_present("#network-ip-settings-dialog")
+            self.configure_iface_setting("IPv6")
+            supported_ip6_methods = ['link-local', 'manual', 'disabled']
+            for method in supported_ip6_methods:
+                b._wait_present(f"#network-ip-settings-select-method option[value='{method}']")
+            unsupported_ip6_methods = ['auto', 'dhcp', 'ignore', 'shared']
+            for method in unsupported_ip6_methods:
+                b.wait_not_present(f"#network-ip-settings-select-method option[value='{method}']")
 
     def testOtherSettings(self):
         b = self.browser
@@ -152,7 +182,7 @@ class TestNetworkingSettings(NetworkCase):
 
         # by default there's a route to link-local only (fe80::)
         show_cmd = f"ip -6 route show dev {iface}"
-        wait(lambda: "fe80::/64" in m.execute(show_cmd))
+        testlib.wait(lambda: "fe80::/64" in m.execute(show_cmd))
         # add a manual one
         self.configure_iface_setting('IPv6')
         b.wait_visible("#network-ip-settings-dialog")
@@ -165,7 +195,7 @@ class TestNetworkingSettings(NetworkCase):
         b.wait_not_present("#network-ip-settings-dialog")
 
         # setting should be applied
-        wait(lambda: "metric 42" in m.execute(show_cmd))
+        testlib.wait(lambda: "metric 42" in m.execute(show_cmd))
         out = m.execute(show_cmd)
         self.assertIn("fe80:2::/60 via fe80:2::3 proto static metric 42", out)
         self.assertIn("fe80:2::3 proto static metric 42", out)
@@ -187,4 +217,4 @@ class TestNetworkingSettings(NetworkCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

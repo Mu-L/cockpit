@@ -14,10 +14,10 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import 'polyfills';
 import 'cockpit-dark-theme'; // once per page
 import cockpit from "cockpit";
@@ -26,11 +26,12 @@ import React from 'react';
 import { createRoot } from "react-dom/client";
 import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Gallery } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
-import { Dropdown, DropdownItem, DropdownPosition, DropdownToggle, DropdownToggleAction } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { Dropdown, DropdownItem, DropdownList } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
+import { MenuToggle, MenuToggleAction } from "@patternfly/react-core/dist/esm/components/MenuToggle";
 
 import { superuser } from "superuser";
 
-import { SystemInfomationCard } from './overview-cards/systemInformationCard.jsx';
+import { SystemInformationCard } from './overview-cards/systemInformationCard.jsx';
 import { ConfigurationCard } from './overview-cards/configurationCard.jsx';
 import { HealthCard } from './overview-cards/healthCard.jsx';
 import { MotdCard } from './overview-cards/motdCard.jsx';
@@ -118,26 +119,35 @@ class OverviewPage extends React.Component {
         let headerActions = null;
         if (this.state.privileged)
             headerActions = (
-                <Dropdown onSelect={() => this.setState({ actionIsOpen: true })}
-                    toggle={
-                        <DropdownToggle
-                            splitButtonItems={[
-                                <DropdownToggleAction id='reboot-button'
-                                    key='reboot-button'
-                                    onClick={() => Dialogs.show(<ShutdownModal />)}>
-                                    {_("Reboot")}
-                                </DropdownToggleAction>
-                            ]}
-                            toggleVariant="secondary"
-                            splitButtonVariant="action"
-                            onToggle={isOpen => this.setState({ actionIsOpen: isOpen })}
+                <Dropdown onSelect={() => this.setState({ actionIsOpen: false })}
+                    toggle={(toggleRef) => (
+                        <MenuToggle
+                            ref={toggleRef}
+                            variant="secondary"
+                            splitButtonOptions={{
+                                variant: "action",
+                                items: [
+                                    <MenuToggleAction
+                                        id='reboot-button'
+                                        key='reboot-button'
+                                        onClick={() => Dialogs.show(<ShutdownModal />)}
+                                    >
+                                        {_("Reboot")}
+                                    </MenuToggleAction>
+                                ],
+                            }}
+                            onClick={() => this.setState({ actionIsOpen: !actionIsOpen })}
                             id="shutdown-group"
                         />
-                    }
+                    )}
                     isOpen={actionIsOpen}
-                    position={DropdownPosition.right}
-                    dropdownItems={dropdownItems}
-                />);
+                    popperProps={{ position: "right" }}
+                >
+                    <DropdownList>
+                        {dropdownItems}
+                    </DropdownList>
+                </Dropdown>
+            );
 
         const show_superuser = (
             cockpit.transport.host && cockpit.transport.host != "localhost" &&
@@ -169,7 +179,7 @@ class OverviewPage extends React.Component {
                         <MotdCard />
                         <HealthCard />
                         <UsageCard />
-                        <SystemInfomationCard />
+                        <SystemInformationCard />
                         <ConfigurationCard hostname={this.hostname_text()} />
                     </Gallery>
                 </PageSection>

@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import time
-
+from typing import Dict, Set
 
 BASE_DIR = os.path.realpath(f'{__file__}/../..')
 TEMPLATE_FILE = f'{BASE_DIR}/tools/debian/copyright.template'
@@ -28,7 +28,6 @@ license_patterns = {
 copyright_patterns = {
     # Common patterns
     r'Copyright (.*)$': [r'\1'],
-    r'@copyright (.*)$': [r'\1'],
     r'\(c\) (.*)$': [r'\1'],
 
     # https://github.com/focus-trap/focus-trap/blob/master/LICENSE
@@ -44,7 +43,7 @@ def parse_args():
 
 
 def template_licenses(template):
-    '''Return set of existing License: short names'''
+    """Return set of existing License: short names"""
 
     ids = set()
     for line in template.splitlines():
@@ -77,8 +76,8 @@ license_ids = template_licenses(template)
 
 # scan dist/ bundles for third-party copyrights and licenses
 
-dist_copyrights = {}  # Files: dirglob → set(copyrights)
-dist_licenses = {}  # Files: dirglob → set(licenses)
+dist_copyrights: Dict[str, Set[str]] = {}  # Files: dirglob → set(copyrights)
+dist_licenses: Dict[str, Set[str]] = {}  # Files: dirglob → set(licenses)
 
 for directory, _subdirs, files in os.walk(f'{BASE_DIR}/dist'):
     for file in files:
@@ -102,9 +101,9 @@ for directory, _subdirs, files in os.walk(f'{BASE_DIR}/dist'):
             licenses = find_patterns(license_patterns, comment)
             if not licenses:
                 raise SystemError('Can not determine licenses of:\n%s' % comment)
-            for license in licenses:
-                if license.lower() not in license_ids:
-                    raise KeyError('License {license} not found in {TEMPLATE_FILE}')
+            for license_id in licenses:
+                if license_id.lower() not in license_ids:
+                    raise KeyError(f'License {license_id} not found in {TEMPLATE_FILE}')
 
             # All bundles also contain our own code
             licenses.add("LGPL-2.1-or-later")
@@ -130,16 +129,16 @@ for pattern in set.union(set(license_patterns), set(copyright_patterns)):
         sys.exit(f'build-debian-copyright: Unused pattern: {pattern}')
 
 paragraphs = []
-for files in sorted(dist_copyrights):
+for dirglob in sorted(dist_copyrights):
     paragraphs.append("Files: {0}\nCopyright: {1}\nLicense: {2}".format(
-        files,
-        '\n '.join(sorted(dist_copyrights[files])),
-        ' and '.join(sorted(dist_licenses[files]))))
+        dirglob,
+        '\n '.join(sorted(dist_copyrights[dirglob])),
+        ' and '.join(sorted(dist_licenses[dirglob]))))
 
 # force UTF-8 output, even when running in C locale
 for line in template.splitlines():
     if '#NPM' in line:
-        sys.stdout.buffer.write('\n\n'.join(paragraphs).encode('UTF-8'))
+        sys.stdout.buffer.write('\n\n'.join(paragraphs).encode())
     else:
-        sys.stdout.buffer.write(line.encode('UTF-8'))
+        sys.stdout.buffer.write(line.encode())
     sys.stdout.buffer.write(b'\n')

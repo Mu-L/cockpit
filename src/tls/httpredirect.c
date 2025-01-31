@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -113,9 +113,7 @@ http_redirect (FILE *input,
   fprintf (output, "HTTP/1.1 301 Moved Permanently\r\n"
                    "Content-Type: text/html\r\n"
                    "Location: https://%s%s\r\n"
-                   "\r\n"
-                   "<html><head><title>Moved</title></head>"
-                   "<body>Please use TLS</body></html>\r\n", host, path);
+                   "\r\n", host, path);
 
   return true;
 }

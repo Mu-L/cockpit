@@ -2,11 +2,12 @@ import asyncio
 import os
 import sys
 
+from cockpit._vendor import systemd_ctypes
+from cockpit.router import Router
 from cockpit.transports import StdioTransport
-from cockpit.protocol import CockpitProtocolServer
 
 
-class MockPeer(CockpitProtocolServer):
+class MockPeer(Router):
     def do_send_init(self):
         init_type = os.environ.get('INIT_TYPE', None)
         if init_type == 'wrong-command':
@@ -21,6 +22,9 @@ class MockPeer(CockpitProtocolServer):
             print('i like printf debugging', flush=True)
         elif init_type == 'exit':
             sys.exit()
+        elif init_type == 'exit-not-found':
+            # shell error code for "command not found"
+            sys.exit(127)
         elif init_type != 'silence':
             self.write_control(command='init', version=1)
 
@@ -33,10 +37,10 @@ class MockPeer(CockpitProtocolServer):
 
 
 async def run():
-    protocol = MockPeer()
+    protocol = MockPeer([])
     StdioTransport(asyncio.get_running_loop(), protocol)
     await protocol.communicate()
 
 
 if __name__ == '__main__':
-    asyncio.run(run())
+    systemd_ctypes.run_async(run())

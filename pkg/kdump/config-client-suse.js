@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import { ConfigFile } from './config-client.js';
@@ -231,7 +231,7 @@ export class ConfigFileSUSE extends ConfigFile {
 
     /* generate the config file from raw text and settings
      */
-    _generateConfig(settings) {
+    generateConfig(settings) {
         settings = this._persistSettings(settings);
 
         const lines = this._lines.slice(0);

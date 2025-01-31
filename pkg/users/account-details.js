@@ -14,52 +14,43 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
-import cockpit from 'cockpit';
 import React, { useState, useEffect, useRef } from 'react';
-import { superuser } from "superuser";
-import { apply_modal_dialog } from "cockpit-components-dialog.jsx";
 
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
-import { EmptyState, EmptyStateIcon, EmptyStateSecondaryActions, EmptyStateVariant } from "@patternfly/react-core/dist/esm/components/EmptyState/index.js";
-import { Flex } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
+import { EmptyState, EmptyStateActions, EmptyStateFooter, EmptyStateHeader, EmptyStateIcon, EmptyStateVariant } from "@patternfly/react-core/dist/esm/components/EmptyState/index.js";
+import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { HelperText, HelperTextItem } from "@patternfly/react-core/dist/esm/components/HelperText/index.js";
-import { Label } from "@patternfly/react-core/dist/esm/components/Label/index.js";
-import { LabelGroup } from "@patternfly/react-core/dist/esm/components/LabelGroup/index.js";
-import { Page, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Label, LabelGroup } from "@patternfly/react-core/dist/esm/components/Label/index.js";
+import { Page, PageBreadcrumb, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Gallery } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
-import { Select, SelectOption, SelectVariant } from "@patternfly/react-core/dist/esm/components/Select/index.js";
-import { Text, TextVariants } from "@patternfly/react-core/dist/esm/components/Text/index.js";
 import { Breadcrumb, BreadcrumbItem } from "@patternfly/react-core/dist/esm/components/Breadcrumb/index.js";
 import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
-import { Title } from "@patternfly/react-core/dist/esm/components/Title/index.js";
 import { Popover } from "@patternfly/react-core/dist/esm/components/Popover/index.js";
 import { ExclamationCircleIcon, HelpIcon, UndoIcon } from '@patternfly/react-icons';
+
+import cockpit from 'cockpit';
+import { superuser } from "superuser";
+import * as timeformat from "timeformat";
+import { apply_modal_dialog } from "cockpit-components-dialog.jsx";
+import { MultiTypeaheadSelect } from "cockpit-components-multi-typeahead-select";
+
 import { show_unexpected_error } from "./dialog-utils.js";
 import { delete_account_dialog } from "./delete-account-dialog.js";
 import { account_expiration_dialog, password_expiration_dialog } from "./expiration-dialogs.js";
+import { account_shell_dialog } from "./shell-dialog.js";
 import { set_password_dialog, reset_password_dialog } from "./password-dialogs.js";
 import { AccountLogs } from "./account-logs-panel.jsx";
 import { AuthorizedKeys } from "./authorized-keys-panel.js";
-import * as timeformat from "timeformat.js";
+import { get_locked } from "./utils.js";
 
 const _ = cockpit.gettext;
-
-function get_locked(name) {
-    return cockpit.spawn(["passwd", "-S", name], { environ: ["LC_ALL=C"], superuser: "require" })
-            .catch(() => "")
-            .then(content => {
-                const status = content.split(" ")[1];
-                // libuser uses "LK", shadow-utils use "L".
-                return status && (status == "LK" || status == "L");
-            });
-}
 
 function get_expire(name) {
     function parse_expire(data) {
@@ -105,18 +96,12 @@ function get_expire(name) {
             .then(parse_expire);
 }
 
-export function AccountDetails({ accounts, groups, shadow, current_user, user }) {
+export function AccountDetails({ accounts, groups, current_user, user, shells }) {
     const [expiration, setExpiration] = useState(null);
+
     useEffect(() => {
         get_expire(user).then(setExpiration);
-
-        // Watch `/var/run/utmp` to register when user logs in or out
-        const handle = cockpit.file("/var/run/utmp", { superuser: "try", binary: true });
-        handle.watch(() => {
-            get_expire(user).then(setExpiration);
-        });
-        return handle.close;
-    }, [user, accounts, shadow]);
+    }, [user, accounts]);
 
     const [edited_real_name, set_edited_real_name] = useState(null);
     const [committing_real_name, set_committing_real_name] = useState(false);
@@ -155,7 +140,6 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
                                this is a workaround for different ways of handling a locked account
                                https://github.com/cockpit-project/cockpit/issues/1216
                                https://bugzilla.redhat.com/show_bug.cgi?id=853153
-                               This seems to be fixed in fedora 23 (usermod catches the different locking behavior)
                             */
                                 if (locked != value && !dont_retry_if_stuck) {
                                     console.log("Account locked state doesn't match desired value, trying again.");
@@ -182,11 +166,9 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
 
     if (!accounts.length) {
         return (
-            <EmptyState variant={EmptyStateVariant.small}>
-                <Spinner isSVG size="xl" />
-                <Title headingLevel="h1" size="lg">
-                    {_("Loading...")}
-                </Title>
+            <EmptyState variant={EmptyStateVariant.sm}>
+                <EmptyStateHeader titleText={_("Loading...")} headingLevel="h1" />
+                <EmptyStateFooter><Spinner size="xl" /></EmptyStateFooter>
             </EmptyState>
         );
     }
@@ -195,16 +177,15 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
 
     if (!account) {
         return (
-            <EmptyState variant={EmptyStateVariant.small} id="account-failure">
-                <EmptyStateIcon icon={ExclamationCircleIcon} />
-                <Title headingLevel="h1" size="lg">
-                    {_("Account not available or cannot be edited.")}
-                </Title>
-                <EmptyStateSecondaryActions>
-                    <Breadcrumb>
-                        <BreadcrumbItem to="#/">{_("Back to accounts")}</BreadcrumbItem>
-                    </Breadcrumb>
-                </EmptyStateSecondaryActions>
+            <EmptyState variant={EmptyStateVariant.sm} id="account-failure">
+                <EmptyStateHeader titleText={<>{_("Account not available or cannot be edited.")}</>} icon={<EmptyStateIcon icon={ExclamationCircleIcon} />} headingLevel="h1" />
+                <EmptyStateFooter>
+                    <EmptyStateActions>
+                        <Breadcrumb>
+                            <BreadcrumbItem to="#/">{_("Back to accounts")}</BreadcrumbItem>
+                        </Breadcrumb>
+                    </EmptyStateActions>
+                </EmptyStateFooter>
             </EmptyState>
         );
     }
@@ -228,33 +209,33 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
     else
         last_login = timeformat.dateTime(new Date(account.lastLogin));
 
+    const actions = superuser.allowed && (
+        <>
+            <Button variant="secondary" onClick={() => logout_account()} id="account-logout"
+              isDisabled={!account.loggedIn || account.uid == 0}>
+                {_("Terminate session")}
+            </Button>
+            { "\n" }
+            <Button isDisabled={account.uid == 0} variant="danger" id="account-delete"
+                  onClick={() => delete_account_dialog(account)}>
+                {_("Delete")}
+            </Button>
+        </>
+    );
+
     return (
-        <Page groupProps={{ sticky: 'top' }}
-              isBreadcrumbGrouped
-              id="account"
-              breadcrumb={
-                  <Breadcrumb>
-                      <BreadcrumbItem to="#/">{_("Accounts")}</BreadcrumbItem>
-                      <BreadcrumbItem isActive>{title_name}</BreadcrumbItem>
-                  </Breadcrumb>}>
+        <Page id="account">
+            <PageBreadcrumb stickyOnBreakpoint={{ default: "top" }}>
+                <Breadcrumb>
+                    <BreadcrumbItem to="#/">{_("Accounts")}</BreadcrumbItem>
+                    <BreadcrumbItem isActive>{title_name}</BreadcrumbItem>
+                </Breadcrumb>
+            </PageBreadcrumb>
             <PageSection>
                 <Gallery hasGutter>
                     <Card className="account-details" id="account-details">
-                        <CardHeader>
-                            <CardTitle id="account-title"><Text component={TextVariants.h2}>{title_name}</Text></CardTitle>
-                            { superuser.allowed &&
-                            <CardActions>
-                                <Button variant="secondary" onClick={() => logout_account()} id="account-logout"
-                                  isDisabled={!account.loggedIn || account.uid == 0}>
-                                    {_("Terminate session")}
-                                </Button>
-                                { "\n" }
-                                <Button isDisabled={account.uid == 0} variant="danger" id="account-delete"
-                                      onClick={() => delete_account_dialog(account)}>
-                                    {_("Delete")}
-                                </Button>
-                            </CardActions>
-                            }
+                        <CardHeader actions={{ actions }}>
+                            <CardTitle id="account-title" component="h2">{title_name}</CardTitle>
                         </CardHeader>
                         <CardBody>
                             <Form isHorizontal onSubmit={apply_modal_dialog}>
@@ -263,12 +244,12 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
                                         ? <TextInput id="account-real-name"
                                                      isDisabled={committing_real_name || account.uid == 0}
                                                      value={edited_real_name !== null ? edited_real_name : account.gecos}
-                                                     onKeyPress={event => {
+                                                     onKeyDown={event => {
                                                          if (event.key == "Enter") {
                                                              event.target.blur();
                                                          }
                                                      }}
-                                                     onChange={value => set_edited_real_name(value)}
+                                                     onChange={(_event, value) => set_edited_real_name(value)}
                                                      onBlur={() => change_real_name()} />
                                         : <output id="account-real-name">{account.gecos}</output>}
                                 </FormGroup>
@@ -281,18 +262,18 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
                                 </FormGroup>
                                 <FormGroup fieldId="account-locked" label={_("Options")} hasNoPaddingTop>
                                     <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
-                                        <Flex className="accounts-column-one" spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
+                                        <FlexItem spacer={{ default: 'spacerNone' }}>
                                             <Checkbox id="account-locked"
-                                                        isDisabled={!superuser.allowed || edited_locked != null || user == current_user}
+                                                        isDisabled={!superuser.allowed || edited_locked != null || user == current_user || account.isLocked == null}
                                                         isChecked={edited_locked != null ? edited_locked : account.isLocked}
-                                                        onChange={checked => change_locked(checked)}
+                                                        onChange={(_event, checked) => change_locked(checked)}
                                                         label={_("Disallow interactive password")} />
+                                        </FlexItem>
 
-                                            <Popover bodyContent={_("Other authentication methods are still available even when interactive password authentication is not allowed.")}
-                                                        showClose={false}>
-                                                <HelpIcon />
-                                            </Popover>
-                                        </Flex>
+                                        <Popover bodyContent={_("Other authentication methods are still available even when interactive password authentication is not allowed.")}
+                                                    showClose={false}>
+                                            <HelpIcon />
+                                        </Popover>
                                         <span id="account-expiration-text">
                                             {expiration.account_text}
                                         </span>
@@ -340,7 +321,16 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
                                     <output id="account-home-dir">{account.home}</output>
                                 </FormGroup> }
                                 { account.shell && <FormGroup fieldId="account-shell" hasNoPaddingTop label={_("Shell")}>
-                                    <output id="account-shell">{account.shell}</output>
+                                    <Flex flex={{ default: 'inlineFlex' }}>
+                                        <output id="account-shell">{account.shell}</output>
+                                        <Button onClick={() => account_shell_dialog(account, shells)}
+                                                isDisabled={!superuser.allowed}
+                                                variant="link"
+                                                isInline
+                                                id="change-shell-button">
+                                            {_("change")}
+                                        </Button>
+                                    </Flex>
                                 </FormGroup> }
                             </Form>
                         </CardBody>
@@ -353,11 +343,11 @@ export function AccountDetails({ accounts, groups, shadow, current_user, user })
     );
 }
 
-export const AccountGroupsSelect = ({ name, loggedIn, groups, setError }) => {
-    const [isOpenGroup, setIsOpenGroup] = useState(false);
+export const AccountGroupsSelect = ({ name, loggedIn, groups }) => {
     const [selected, setSelected] = useState();
     const [primaryGroupName, setPrimaryGroupName] = useState();
     const [loading, setLoading] = useState(true);
+    const [modifyingGroup, setModifyingGroup] = useState(false);
     const [history, setHistory] = useState([]);
     const previousValue = useRef(null);
 
@@ -388,10 +378,10 @@ export const AccountGroupsSelect = ({ name, loggedIn, groups, setError }) => {
         if (!isUndo)
             setHistory([...history, { type: 'removed', name: group }]);
 
-        setLoading(true);
+        setModifyingGroup(true);
         return cockpit.spawn(["gpasswd", "-d", name, group], { superuser: "require", err: "message" })
                 .then(() => {
-                    setIsOpenGroup(false);
+                    setModifyingGroup(false);
                 }, show_unexpected_error);
     };
 
@@ -399,38 +389,20 @@ export const AccountGroupsSelect = ({ name, loggedIn, groups, setError }) => {
         if (!isUndo)
             setHistory([...history, { type: 'added', name: group }]);
 
-        setLoading(true);
+        setModifyingGroup(true);
         return cockpit.spawn(["gpasswd", "-a", name, group], { superuser: "require", err: "message" })
                 .then(() => {
-                    setIsOpenGroup(false);
+                    setModifyingGroup(false);
                 }, show_unexpected_error);
-    };
-
-    const onSelectGroup = (event, selection) => {
-        if (selected.includes(selection)) {
-            removeGroup(selection);
-        } else {
-            addGroup(selection);
-        }
     };
 
     const chipGroupComponent = () => {
         return (
             <LabelGroup numLabels={10}>
                 {(selected || []).map((currentLabel, index) => {
-                    const optional = currentLabel !== primaryGroupName && superuser.allowed
-                        ? {
-                            onClose: ev => {
-                                ev.stopPropagation();
-                                removeGroup(currentLabel);
-                            }
-                        }
-                        : {};
-
                     return (
                         <Label key={currentLabel}
                                color={groups.find(group => group.name === currentLabel).isAdmin ? "gold" : "cyan"}
-                               {...optional}
                         >
                             {currentLabel}
                         </Label>
@@ -443,40 +415,36 @@ export const AccountGroupsSelect = ({ name, loggedIn, groups, setError }) => {
     return (
         <FormGroup
             fieldId="account-groups"
-            helperText={
-                (history.length > 0)
-                    ? <HelperText className="pf-c-form__helper-text">
-                        <Flex>
-                            {loggedIn && <HelperTextItem id="account-groups-helper" variant="warning">{_("The user must log out and log back in for the new configuration to take effect.")}</HelperTextItem>}
-                            {history.length > 0 && <Button variant="link" id="group-undo-btn" isInline icon={<UndoIcon />} onClick={undoGroupChanges}>{_("Undo")}</Button>}
-                        </Flex>
-                    </HelperText>
-                    : ''
-            }
             id="account-groups-form-group"
             label={_("Groups")}
             validated={history.length > 0 ? "warning" : "default"}
         >
             {superuser.allowed
-                ? <Select
-                   chipGroupComponent={chipGroupComponent()}
-                   isDisabled={!superuser.allowed || loading}
-                   isOpen={isOpenGroup}
-                   onSelect={onSelectGroup}
-                   onToggle={setIsOpenGroup}
-                   selections={selected}
-                   toggleId="account-groups"
-                   variant={SelectVariant.typeaheadMulti}
-                >
-                    {groups.map((option, index) => (
-                        <SelectOption
-                            isDisabled={option.name == primaryGroupName}
-                            key={index}
-                            value={option.name}
-                        />
-                    ))}
-                </Select>
+                ? <MultiTypeaheadSelect
+                      isScrollable
+                      isDisabled={loading || modifyingGroup}
+                      onAdd={val => addGroup(val)}
+                      onRemove={val => removeGroup(val)}
+                      options={groups.map((option, index) => {
+                          return {
+                              value: option.name,
+                              content: option.name,
+                              color: option.isAdmin ? "gold" : "cyan",
+                              isDisabled: option.name == primaryGroupName,
+                          };
+                      })}
+                      selected={selected || []}
+                      toggleProps={{ id: "account-groups" }} />
                 : chipGroupComponent()}
+            {(history.length > 0)
+                ? <HelperText className="pf-v5-c-form__helper-text">
+                    <Flex>
+                        {loggedIn && <HelperTextItem id="account-groups-helper" variant="warning">{_("The user must log out and log back in for the new configuration to take effect.")}</HelperTextItem>}
+                        {history.length > 0 && <Button variant="link" id="group-undo-btn" isInline icon={<UndoIcon />} onClick={undoGroupChanges}>{_("Undo")}</Button>}
+                    </Flex>
+                </HelperText>
+                : ''
+            }
         </FormGroup>
     );
 };

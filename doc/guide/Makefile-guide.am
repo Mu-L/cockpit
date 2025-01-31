@@ -21,6 +21,7 @@ GUIDE_INCLUDES = \
 	doc/guide/cockpit-session.xml \
 	doc/guide/cockpit-spawn.xml \
 	doc/guide/cockpit-util.xml \
+	doc/guide/multi-host.xml \
 	doc/guide/authentication.xml \
 	doc/guide/embedding.xml \
 	doc/guide/feature-firewall.xml \
@@ -97,7 +98,7 @@ clean-guide:
 
 CHECK_LOCAL_TARGETS += check-guide
 check-guide:
-	if grep -n -r 'name=\"id' doc/guide/html >&2; then \
+	if grep -n -r 'name="id' doc/guide/html >&2; then \
 		echo "Unexpected generated id in the documentation" >&2; \
 		exit 1; \
 	fi

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,19 +15,19 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
 import json
-from netlib import NetworkCase
-from testlib import nondestructive, skipDistroPackage, skipImage, skipOstree, test_main
+
+import netlib
+import testlib
 
 
-@skipOstree("NetworkManager-team not installed")
-@skipImage("TODO: networkmanager fails on Arch Linux", "arch")
-@skipDistroPackage()
-@nondestructive
-class TestTeam(NetworkCase):
+@testlib.skipOstree("NetworkManager-team not installed")
+@testlib.skipImage("TODO: networkmanager fails on Arch Linux", "arch")
+@testlib.skipImage("team not supported", "centos-10*", "rhel-10*")
+@testlib.nondestructive
+class TestTeam(netlib.NetworkCase):
     def testBasic(self):
         b = self.browser
 
@@ -49,14 +49,14 @@ class TestTeam(NetworkCase):
         b.wait_visible("#network-team-settings-dialog")
 
         # wait until dialog initialized
-        b.wait_visible("#network-team-settings-dialog > button[aria-label=Close]")
+        b.wait_visible("#network-team-settings-dialog button[aria-label=Close]")
         b.wait_in_text("#network-team-settings-body", "cockpit2")
         b.assert_pixels("#network-team-settings-dialog", "networking-team-settings-dialog")
 
         b.set_input_text("#network-team-settings-interface-name-input", "tteam")
-        b.set_checked(f"input[data-iface='{iface1}']", True)
-        b.set_checked(f"input[data-iface='{iface2}']", True)
-        b.click("#network-team-settings-dialog button:contains('Save')")
+        b.set_checked(f"input[data-iface='{iface1}']", val=True)
+        b.set_checked(f"input[data-iface='{iface2}']", val=True)
+        b.click("#network-team-settings-dialog button:contains('Add')")
         b.wait_not_present("#network-team-settings-dialog")
 
         b.wait_attr("#networking", "data-test-wait", "false")
@@ -71,8 +71,8 @@ class TestTeam(NetworkCase):
 
         # Deactivate the team and make sure it is still there after a
         # reload.
-        self.wait_onoff(".pf-c-card__header:contains('tteam')", True)
-        self.toggle_onoff(".pf-c-card__header:contains('tteam')")
+        self.wait_onoff(".pf-v5-c-card__header:contains('tteam')", val=True)
+        self.toggle_onoff(".pf-v5-c-card__header:contains('tteam')")
         self.wait_for_iface_setting('Status', 'Inactive')
         b.reload()
         b.enter_page("/network")
@@ -108,8 +108,8 @@ class TestTeam(NetworkCase):
         b.click("button:contains('Add team')")
         b.wait_visible("#network-team-settings-dialog")
         b.set_input_text("#network-team-settings-interface-name-input", "tteam")
-        b.set_checked(f"input[data-iface='{iface}']", True)
-        b.click("#network-team-settings-dialog button:contains('Save')")
+        b.set_checked(f"input[data-iface='{iface}']", val=True)
+        b.click("#network-team-settings-dialog button:contains('Add')")
         b.wait_not_present("#network-team-settings-dialog")
 
         b.wait_attr("#networking", "data-test-wait", "false")
@@ -119,14 +119,14 @@ class TestTeam(NetworkCase):
         self.select_iface('tteam')
         b.wait_visible("#network-interface")
         b.wait_visible(f"#network-interface-members tr[data-interface='{iface}']")
-        b.wait_in_text("#network-interface .pf-c-card:contains('tteam')", "10.111")
+        b.wait_in_text("#network-interface .pf-v5-c-card:contains('tteam')", "10.111")
 
         # Check team port
         b.click("#network-interface-members button:contains(cockpit1)")
         b.click("#networking-edit-teamport")
         b.wait_visible("#network-team-port-settings-dialog")
         b.set_input_text("#network-team-port-settings-activebackup-prio-input", "10")
-        b.set_checked("#network-team-port-settings-activebackup-sticky-input", True)
+        b.set_checked("#network-team-port-settings-activebackup-sticky-input", val=True)
         b.click("#network-team-port-settings-save")
         b.wait_not_present("#network-team-port-settings-dialog")
 
@@ -142,4 +142,4 @@ class TestTeam(NetworkCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

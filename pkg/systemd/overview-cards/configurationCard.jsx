@@ -14,14 +14,15 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 import React, { useState } from 'react';
 import { Card, CardBody, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
 import { Alert } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
-import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
+import { Form, FormGroup, FormHelperText } from "@patternfly/react-core/dist/esm/components/Form/index.js";
+import { HelperText, HelperTextItem, } from "@patternfly/react-core/dist/esm/components/HelperText/index.js";
 import { List, ListItem } from "@patternfly/react-core/dist/esm/components/List/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 
@@ -56,51 +57,49 @@ export const ConfigurationCard = ({ hostname }) => {
         : null;
 
     return (
-        <>
-            <Card className="system-configuration">
-                <CardTitle>{_("Configuration")}</CardTitle>
-                <CardBody>
-                    <table className="pf-c-table pf-m-grid-md pf-m-compact">
-                        <tbody>
-                            <tr>
-                                <th scope="row">{_("Hostname")}</th>
-                                <td>
-                                    {hostname && <span id="system_information_hostname_text">{hostname}</span>}
-                                    <span>{hostname_button}</span>
-                                </td>
-                            </tr>
+        <Card className="system-configuration">
+            <CardTitle>{_("Configuration")}</CardTitle>
+            <CardBody>
+                <table className="pf-v5-c-table pf-m-grid-md pf-m-compact">
+                    <tbody className="pf-v5-c-table__tbody">
+                        <tr className="pf-v5-c-table__tr">
+                            <th className="pf-v5-c-table__th" scope="row">{_("Hostname")}</th>
+                            <td className="pf-v5-c-table__td">
+                                {hostname && <span id="system_information_hostname_text">{hostname}</span>}
+                                <span>{hostname_button}</span>
+                            </td>
+                        </tr>
 
-                            <tr>
-                                <th scope="row">{_("System time")}</th>
-                                <td><ServerTimeConfig /></td>
-                            </tr>
+                        <tr className="pf-v5-c-table__tr">
+                            <th className="pf-v5-c-table__th" scope="row">{_("System time")}</th>
+                            <td className="pf-v5-c-table__td"><ServerTimeConfig /></td>
+                        </tr>
 
-                            <tr>
-                                <th scope="row">{_("Domain")}</th>
-                                <td><RealmButton realmd_client={realmd_client} /></td>
-                            </tr>
+                        <tr className="pf-v5-c-table__tr">
+                            <th className="pf-v5-c-table__th" scope="row">{_("Domain")}</th>
+                            <td className="pf-v5-c-table__td"><RealmButton realmd_client={realmd_client} /></td>
+                        </tr>
 
-                            <tr>
-                                <th scope="row">{_("Performance profile")}</th>
-                                <td><TunedPerformanceProfile /></td>
-                            </tr>
+                        <tr className="pf-v5-c-table__tr">
+                            <th className="pf-v5-c-table__th" scope="row">{_("Performance profile")}</th>
+                            <td className="pf-v5-c-table__td"><TunedPerformanceProfile /></td>
+                        </tr>
 
-                            <CryptoPolicyRow />
+                        <CryptoPolicyRow />
 
-                            <tr>
-                                <th scope="row">{_("Secure shell keys")}</th>
-                                <td>
-                                    <Button variant="link" isInline id="system-ssh-keys-link"
+                        <tr className="pf-v5-c-table__tr">
+                            <th className="pf-v5-c-table__th" scope="row">{_("Secure shell keys")}</th>
+                            <td className="pf-v5-c-table__td">
+                                <Button variant="link" isInline id="system-ssh-keys-link"
                                             onClick={() => Dialogs.show(<SystemInformationSshKeys />)}>
-                                        {_("Show fingerprints")}
-                                    </Button>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </CardBody>
-            </Card>
-        </>
+                                    {_("Show fingerprints")}
+                                </Button>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </CardBody>
+        </Card>
     );
 };
 
@@ -193,9 +192,7 @@ const SystemInformationSshKeys = () => {
                onClose={Dialogs.close}
                id="system_information_ssh_keys"
                title={_("Machine SSH key fingerprints")}
-               footer={<>
-                   <Button variant='secondary' onClick={Dialogs.close}>{_("Close")}</Button>
-               </>}
+               footer={<Button variant='secondary' onClick={Dialogs.close}>{_("Close")}</Button>}
         >
             {body}
         </Modal>
@@ -242,9 +239,9 @@ const PageSystemInformationChangeHostname = () => {
                     .toLowerCase()
                     .replace(/['".]+/g, "")
                     .replace(/[^a-zA-Z0-9]+/g, "-");
-            new_hostname = new_hostname.substr(0, 64);
+            new_hostname = new_hostname.substring(0, 64);
             if (first_dot >= 0)
-                new_hostname = new_hostname + old_hostname.substr(first_dot);
+                new_hostname = new_hostname + old_hostname.substring(first_dot);
             set_hostname(new_hostname);
         }
     }
@@ -285,12 +282,19 @@ const PageSystemInformationChangeHostname = () => {
         >
             <Form isHorizontal onSubmit={onSubmit}>
                 <FormGroup fieldId="sich-pretty-hostname" label={_("Pretty host name")}>
-                    <TextInput id="sich-pretty-hostname" value={pretty} onChange={onPrettyChanged} />
+                    <TextInput id="sich-pretty-hostname" value={pretty} onChange={(_event, value) => onPrettyChanged(value)} />
                 </FormGroup>
-                <FormGroup fieldId="sich-hostname" label={_("Real host name")}
-                           helperTextInvalid={error.join("\n")}
-                           validated={error.length ? "error" : "default"}>
-                    <TextInput id="sich-hostname" value={hostname} onChange={onHostnameChanged} />
+                <FormGroup fieldId="sich-hostname" label={_("Real host name")}>
+                    <TextInput id="sich-hostname" value={hostname} onChange={(_event, value) => onHostnameChanged(value)} validated={error.length ? "error" : "default"} />
+                    {error.length > 0 && <FormHelperText>
+                        <HelperText>
+                            {error.map((err, i) =>
+                                <HelperTextItem key={i} variant="error">
+                                    {err}
+                                </HelperTextItem>
+                            )}
+                        </HelperText>
+                    </FormHelperText>}
                 </FormGroup>
             </Form>
         </Modal>

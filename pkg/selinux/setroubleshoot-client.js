@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -31,7 +31,7 @@ const busNameFixit = "org.fedoraproject.SetroubleshootFixit";
 const dbusInterfaceFixit = busNameFixit;
 const dbusPathFixit = "/org/fedoraproject/SetroubleshootFixit/object";
 
-client.init = function(capabilitiesChangedCallback) {
+client.init = function() {
     client.connected = false;
     const dbusClientSeTroubleshoot = cockpit.dbus(busName, { superuser: "try" });
     client.proxy = dbusClientSeTroubleshoot.proxy(dbusInterface, dbusPath);
@@ -107,85 +107,56 @@ client.init = function(capabilitiesChangedCallback) {
       lastSeen: when the alert was seen for the last time, timestamp in ms
       level: "green", "yellow" or "red"
     */
-    client.getAlert = function(localId) {
-        return new Promise((resolve, reject) => {
-            client.proxy.call("get_alert", [localId])
-                    .then(result => {
-                        const details = {
-                            localId: result[0],
-                            summary: result[1],
-                            reportCount: result[2],
-                            auditEvent: result[3],
-                            pluginAnalysis: result[4],
-                            firstSeen: result[5] / 1000,
-                            lastSeen: result[6] / 1000,
-                            level: result[7],
-                        };
-                        // cleanup analysis
-                        details.pluginAnalysis = details.pluginAnalysis.map(itm => ({
-                            ifText: itm[0],
-                            thenText: itm[1],
-                            doText: itm[2],
-                            analysisId: itm[3],
-                            fixable: itm[4],
-                            reportBug: itm[5],
-                        }));
-                        resolve(details);
-                    })
-                    .catch(ex => {
-                        console.warn("Unable to get alert for id " + localId);
-                        console.warn(ex);
-                        reject(new Error(cockpit.format(_("Unable to get alert: $0"), localId)));
-                    });
-        });
-    };
+    client.getAlert = localId => client.proxy.call("get_alert", [localId])
+            .then(result => {
+                const details = {
+                    localId: result[0],
+                    summary: result[1],
+                    reportCount: result[2],
+                    auditEvent: result[3],
+                    pluginAnalysis: result[4],
+                    firstSeen: result[5] / 1000,
+                    lastSeen: result[6] / 1000,
+                    level: result[7],
+                };
+                // cleanup analysis
+                details.pluginAnalysis = details.pluginAnalysis.map(itm => ({
+                    ifText: itm[0],
+                    thenText: itm[1],
+                    doText: itm[2],
+                    analysisId: itm[3],
+                    fixable: itm[4],
+                    reportBug: itm[5],
+                }));
+                return details;
+            })
+            .catch(ex => {
+                console.warn("Unable to get alert for id", localId, ":", JSON.stringify(ex));
+                return Promise.reject(new Error(`Unable to get alert for id ${localId}: ${ex.toString()}`));
+            });
 
     /* Run a fix via SetroubleshootFixit
        The analysisId is given as part of pluginAnalysis entries in alert details
      */
-    client.runFix = function(alertId, analysisId) {
-        return new Promise((resolve, reject) => {
-            client.proxyFixit.call("run_fix", [alertId, analysisId])
-                    .then(result => resolve(result[0]))
-                    .catch(ex => reject(new Error(cockpit.format(_("Unable to run fix: $0"), ex))));
-        });
-    };
+    client.runFix = (alertId, analysisId) => client.proxyFixit.call("run_fix", [alertId, analysisId])
+            .then(result => result[0])
+            .catch(ex => {
+                console.warn("Unable to run fix:", JSON.stringify(ex));
+                return Promise.reject(new Error(cockpit.format(_("Unable to run fix: $0"), ex.toString())));
+            });
 
     /* Delete an alert from the database (will be removed for all users), returns true on success
      * Only assign this to the client variable if the dbus interface actually supports the operation
      */
-    const deleteAlert = function(localId) {
-        return new Promise((resolve, reject) => {
-            client.proxy.call("delete_alert", [localId])
-                    .then(success => {
-                        if (success)
-                            resolve();
-                        else
-                            reject(new Error(cockpit.format(_("Failed to delete alert: $0"), localId)));
-                    })
-                    .catch(ex => {
-                        console.warn("Unable to delete alert with id " + localId);
-                        console.warn(ex);
-                        reject(new Error(cockpit.format(_("Error while deleting alert: $0"), localId)));
-                    });
-        });
-    };
-
-    // earlier versions of the dbus interface don't support alert deletion/dismissal
-    // HACK https://bugzilla.redhat.com/show_bug.cgi?id=1306700
-    // once every client we ship to handles these features, we can remove the capabilities check
-    client.capabilities = { };
-
-    // wait for metadata - if this has the method delete_alert, we can use that
-    dbusClientSeTroubleshoot.addEventListener("meta", function(event, meta) {
-        if (dbusInterface in meta && 'methods' in meta[dbusInterface] && 'delete_alert' in meta[dbusInterface].methods)
-            client.capabilities.deleteAlert = deleteAlert;
-        else
-            delete client.capabilities.deleteAlert;
-
-        if (capabilitiesChangedCallback)
-            capabilitiesChangedCallback(client.capabilities);
-    });
+    client.deleteAlert = localId => client.proxy.call("delete_alert", [localId])
+            .then(success => {
+                if (!success)
+                    return Promise.reject(new Error(cockpit.format(_("Failed to delete alert: $0"), localId)));
+            })
+            .catch(ex => {
+                console.warn("Unable to delete alert with id", localId, ":", JSON.stringify(ex));
+                return Promise.reject(new Error(cockpit.format(_("Failed to delete alert: $0"), ex.toString())));
+            });
 
     // connect to dbus and start setroubleshootd
     return connectPromise;

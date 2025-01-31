@@ -3,9 +3,9 @@
 .ct-table {
   &.pf-m-compact {
     > thead, > tbody {
-      > tr:not(.pf-c-table__expandable-row) {
+      > tr:not(.pf-v5-c-table__expandable-row) {
         // We actually want the normal font size for our lists
-        --pf-c-table-cell--FontSize: var(--pf-global--FontSize--md);
+        --pf-v5-c-table-cell--FontSize: var(--pf-v5-global--FontSize--md);
       }
     }
   }
@@ -24,9 +24,9 @@
     // Push buttons to the right by stretching the heading
     flex: auto;
     // Add a bit of minimum margin to the right of the heading
-    margin-right: var(--pf-global--spacer--md);
+    margin-inline-end: var(--pf-v5-global--spacer--md);
     // Set a minimum height of 3rem, so when buttons wrap, there's spacing
-    min-height: var(--pf-global--spacer--2xl);
+    min-block-size: var(--pf-v5-global--spacer--2xl);
     // Make sure textual content is aligned to the center
     display: flex;
     align-items: center;
@@ -34,11 +34,12 @@
 
   &-actions {
     > * {
-      margin: var(--pf-global--spacer--xs) 0 var(--pf-global--spacer--xs) var(--pf-global--spacer--sm);
+      margin-block: var(--pf-v5-global--spacer--xs);
+      margin-inline: var(--pf-v5-global--spacer--sm) 0;
     }
 
     > :first-child {
-      margin-left: 0;
+      margin-inline-start: 0;
     }
   }
 
@@ -59,12 +60,12 @@
   }
 
   // Fix toggle button alignment
-  .pf-c-table__toggle {
+  .pf-v5-c-table__toggle {
     // Workaround: Chrome sometimes oddly expands the table,
     // unless a width is set. (This affects panels the most, but not only.)
     // As the width is smaller than the contents, and this is a table,
     // the cell will stay at the correct width.
-    width: 1px;
+    inline-size: 1px;
   }
 
   // Properly align actions on the end
@@ -76,30 +77,16 @@
 
   // Use PF4 style headings
   > thead th {
-    font-size: var(--pf-global--FontSize--sm);
-    font-weight: var(--pf-global--FontWeight--semi-bold);
-  }
-
-  // Adjust the padding for nested ct-tables in ct-tables
-  // FIXME: https://github.com/patternfly/patternfly/issues/4280
-  .ct-table {
-    td, th {
-      &:first-child {
-        --pf-c-table--nested--first-last-child--PaddingLeft: var(--pf-global--spacer--lg);
-      }
-
-      &:last-child {
-        --pf-c-table--nested--first-last-child--PaddingRight: var(--pf-global--spacer--lg);
-      }
-    }
+    font-size: var(--pf-v5-global--FontSize--sm);
+    font-weight: var(--pf-v5-global--FontWeight--bold);
   }
 }
 
 // Special handling for rows with errors
-.pf-c-table tbody tr:first-child.error {
+.pf-v5-c-table tbody tr:first-child.error {
   &, tbody.pf-m-expanded > & {
     background-color: var(--ct-color-list-critical-bg) !important; /* keep red background when expanded */
-    border-top: 1px solid var(--ct-color-list-critical-border);
-    border-bottom: 1px solid var(--ct-color-list-critical-border);
+    border-block-start: 1px solid var(--ct-color-list-critical-border);
+    border-block-end: 1px solid var(--ct-color-list-critical-border);
   }
 }

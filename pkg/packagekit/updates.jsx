@@ -14,9 +14,9 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import 'polyfills'; // once per application
 import 'cockpit-dark-theme'; // once per page
 
@@ -27,16 +27,17 @@ import { createRoot } from 'react-dom/client';
 import { Alert } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
 import { Badge } from "@patternfly/react-core/dist/esm/components/Badge/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
+import { CodeBlock, CodeBlockCode } from "@patternfly/react-core/dist/esm/components/CodeBlock/index.js";
 import { Gallery } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
 import { Popover } from "@patternfly/react-core/dist/esm/components/Popover/index.js";
 import { Tooltip } from "@patternfly/react-core/dist/esm/components/Tooltip/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
 import { ExpandableSection } from "@patternfly/react-core/dist/esm/components/ExpandableSection/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Grid, GridItem } from "@patternfly/react-core/dist/esm/layouts/Grid/index.js";
-import { LabelGroup } from "@patternfly/react-core/dist/esm/components/LabelGroup/index.js";
+import { LabelGroup } from "@patternfly/react-core/dist/esm/components/Label/index.js";
 import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Progress, ProgressSize } from "@patternfly/react-core/dist/esm/components/Progress/index.js";
 import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
@@ -70,7 +71,7 @@ import { WithDialogs } from "dialogs.jsx";
 
 import { superuser } from 'superuser';
 import * as PK from "packagekit.js";
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
 
 import * as python from "python.js";
 import callTracerScript from './callTracer.py';
@@ -121,7 +122,7 @@ function parseCVEs(text) {
     const cves = text.match(/CVE-\d{4}-\d+/g);
     if (!cves)
         return [];
-    return cves.map(n => "https://cve.mitre.org/cgi-bin/cvename.cgi?name=" + n);
+    return cves.map(n => "https://www.cve.org/CVERecord?id=" + n);
 }
 
 function deduplicate(list) {
@@ -306,14 +307,13 @@ function updateItem(remarkable, info, pkgNames, key) {
         if (secSeverityURL)
             secSeverityURL = <a rel="noopener noreferrer" target="_blank" href={secSeverityURL}>{secSeverity}</a>;
         type = (
-            <>
-                <Tooltip id="tip-severity" content={ secSeverity || _("security") }>
-                    <span>
-                        {icon}
-                        { (info.cve_urls && info.cve_urls.length > 0) ? info.cve_urls.length : "" }
-                    </span>
-                </Tooltip>
-            </>);
+            <Tooltip id="tip-severity" content={ secSeverity || _("security") }>
+                <span>
+                    {icon}
+                    { (info.cve_urls && info.cve_urls.length > 0) ? info.cve_urls.length : "" }
+                </span>
+            </Tooltip>
+        );
     } else {
         const tip = (info.severity >= PK.Enum.INFO_NORMAL) ? _("bug fix") : _("enhancement");
         type = (
@@ -340,7 +340,7 @@ function updateItem(remarkable, info, pkgNames, key) {
     if (pkgNames.some(pkg => isKpatchPackage(pkg.name)))
         pkgsTruncated.push(
             <LabelGroup key={`${key}-kpatches-labelgroup`} className="kpatches-labelgroup">
-                {" "}<Badge color="blue" variant="filled">{_("patches")}</Badge>
+                {" "}<Badge color="blue">{_("patches")}</Badge>
             </LabelGroup>
         );
 
@@ -503,10 +503,12 @@ class RestartServices extends React.Component {
     render() {
         let body;
         if (this.props.tracerRunning) {
-            body = (<>
-                <div className="spinner spinner-xs spinner-inline" />
-                <p>{_("Reloading the state of remaining services")}</p>
-            </>);
+            body = (
+                <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
+                    <Spinner size="sm" />
+                    <p>{_("Reloading the state of remaining services")}</p>
+                </Flex>
+            );
         } else if (this.props.tracerPackages.daemons.length > 0) {
             body = (<>
                 {cockpit.ngettext("The following service will be restarted:", "The following services will be restarted:", this.props.tracerPackages.daemons.length)}
@@ -574,13 +576,12 @@ const ApplyUpdates = ({ transactionProps, actions, onCancel, rebootAfter, setReb
     }
 
     const cancelButton = transactionProps.AllowCancel
-        ? <Button variant="secondary" onClick={onCancel} isSmall>{_("Cancel")}</Button>
+        ? <Button variant="secondary" onClick={onCancel} size="sm">{_("Cancel")}</Button>
         : null;
 
     if (actions.length === 0 && percentage === 0) {
         return <EmptyStatePanel title={ _("Initializing...") }
                                 headingLevel="h5"
-                                titleSize="4xl"
                                 secondary={cancelButton}
                                 loading
         />;
@@ -594,14 +595,14 @@ const ApplyUpdates = ({ transactionProps, actions, onCancel, rebootAfter, setReb
             <Grid hasGutter>
                 <GridItem span="9">
                     <div className="progress-description">
-                        <Spinner isSVG size="md" />
+                        <Spinner size="md" />
                         <strong>{ PK_STATUS_STRINGS[lastAction?.status] || PK_STATUS_STRINGS[PK.Enum.STATUS_UPDATE] }</strong>
                         &nbsp;{curPackage}
                     </div>
                     <Progress title={remain}
                               value={percentage}
                               size={ProgressSize.sm}
-                              className="pf-u-mb-xs" />
+                              className="pf-v5-u-mb-xs" />
                 </GridItem>
 
                 <GridItem span="3">{cancelButton}</GridItem>
@@ -671,18 +672,27 @@ const TwoColumnTitle = ({ icon, str }) => {
 
 const UpdateSuccess = ({ onIgnore, openServiceRestartDialog, openRebootDialog, restart, manual, reboot, tracerAvailable, history }) => {
     if (!tracerAvailable) {
+        /* tracer is not available any more in RHEL 10; as a special case, if only kpatch and kernel were
+         * updated, don't reboot (as that's their whole raison d'être) */
+        const pkgs = Object.keys(history[0] ?? {}).filter(p => p != "_time");
+        const only_kpatch = pkgs.filter(p => p.startsWith("kpatch")).length > 0 &&
+                            pkgs.filter(p => !p.startsWith("kernel") && !p.startsWith("kpatch")).length == 0;
+
+        const paragraph = only_kpatch ? null : _("Updated packages may require a reboot to take effect.");
+        const actions = only_kpatch
+            ? <Button id="ignore" variant="primary" onClick={onIgnore}>{_("Continue")}</Button>
+            : <>
+                <Button id="reboot-system" variant="primary" onClick={openRebootDialog}>{_("Reboot system...")}</Button>
+                <Button id="ignore" variant="link" onClick={onIgnore}>{_("Ignore")}</Button>
+            </>;
+
         return (<>
             <EmptyStatePanel icon={RebootingIcon}
                              title={ _("Update was successful") }
                              headingLevel="h5"
                              titleSize="4xl"
-                             paragraph={ _("Updated packages may require a reboot to take effect.") }
-                             secondary={
-                                 <>
-                                     <Button id="reboot-system" variant="primary" onClick={openRebootDialog}>{_("Reboot system...")}</Button>
-                                     <Button id="ignore" variant="link" onClick={onIgnore}>{_("Ignore")}</Button>
-                                 </>
-                             } />
+                             paragraph={paragraph}
+                             secondary={actions} />
             <div className="flow-list-blank-slate">
                 <ExpandableSection toggleText={_("Package information")}>
                     <PackageList packages={history[0]} />
@@ -779,7 +789,7 @@ const UpdatesStatus = ({ updates, highestSeverity, timeSinceRefresh, tracerPacka
     let lastChecked;
     // PackageKit returns G_MAXUINT if the db was never checked.
     if (timeSinceRefresh !== null && timeSinceRefresh !== 2 ** 32 - 1)
-        lastChecked = cockpit.format(_("Last checked: $0"), timeformat.distanceToNow(new Date().valueOf() - timeSinceRefresh * 1000, true));
+        lastChecked = cockpit.format(_("Last checked: $0"), timeformat.distanceToNow(new Date().valueOf() - timeSinceRefresh * 1000));
 
     const notifications = [];
     if (numUpdates > 0) {
@@ -926,7 +936,7 @@ class CardsPage extends React.Component {
                     {this.props.cockpitUpdate &&
                         <Flex flex={{ default: 'inlineFlex' }} className="cockpit-update-warning">
                             <FlexItem>
-                                <ExclamationTriangleIcon className="ct-icon-exclamation-triangle cockpit-update-warning-icon" size="sm" />
+                                <ExclamationTriangleIcon className="ct-icon-exclamation-triangle cockpit-update-warning-icon" />
                                 <strong className="cockpit-update-warning-text">
                                     <span className="pf-screen-reader">{_("Danger alert:")}</span>
                                     {_("Web Console will restart")}
@@ -960,9 +970,8 @@ class CardsPage extends React.Component {
         return cardContents.map(card => {
             return (
                 <Card key={card.id} className={card.className} id={card.id}>
-                    <CardHeader>
-                        {card.actions && <CardActions>{card.actions}</CardActions>}
-                        <CardTitle><h2>{card.title}</h2></CardTitle>
+                    <CardHeader actions={{ actions: card.actions }}>
+                        <CardTitle component="h2">{card.title}</CardTitle>
                     </CardHeader>
                     <CardBody className={card.containsList ? "contains-list" : null}>
                         {card.body}
@@ -1073,7 +1082,17 @@ class OsUpdates extends React.Component {
                     this.setState(nextState);
                 })
                 .catch((exception, data) => {
-                    console.error(`Tracer failed: "${JSON.stringify(exception)}", data: "${JSON.stringify(data)}"`);
+                    // common cases: this platform does not have tracer installed
+                    if (!exception.message?.includes("ModuleNotFoundError") &&
+                        // or supported (like on Arch)
+                        !exception.message?.includes("UnsupportedDistribution") &&
+                        // or polkit does not allow it
+                        exception.problem !== "access-denied" &&
+                        // or unprivileged session
+                        exception.problem !== "authentication-failed" &&
+                        // or the session goes away while checking
+                        exception.problem !== "terminated")
+                        console.error(`Tracer failed: "${JSON.stringify(exception)}", data: "${JSON.stringify(data)}"`);
                     // When tracer fails, act like it's not available (demand reboot after every update)
                     const nextState = { tracerAvailable: false, tracerRunning: false, tracerPackages: { reboot: [], daemons: [], manual: [] } };
                     if (state)
@@ -1115,13 +1134,6 @@ class OsUpdates extends React.Component {
                 }
 
                 u.vendor_urls = vendor_urls;
-                // HACK: bug_urls and cve_urls also contain titles, in a not-quite-predictable order; ignore them,
-                // only pick out http[s] URLs (https://bugs.freedesktop.org/show_bug.cgi?id=104552)
-                if (bug_urls)
-                    bug_urls = bug_urls.filter(url => url.match(/^https?:\/\//));
-                if (cve_urls)
-                    cve_urls = cve_urls.filter(url => url.match(/^https?:\/\//));
-
                 u.description = this.removeHeading(update_text) || changelog;
                 if (update_text)
                     u.markdown = true;
@@ -1450,7 +1462,8 @@ class OsUpdates extends React.Component {
                         </Gallery>
                     </PageSection>
                     { this.state.showRestartServicesDialog &&
-                        <RestartServices tracerPackages={this.state.tracerPackages}
+                        <RestartServices
+                            tracerPackages={this.state.tracerPackages}
                             close={() => this.setState({ showRestartServicesDialog: false })}
                             state={this.state.state}
                             callTracer={(state) => this.callTracer(state)}
@@ -1470,25 +1483,26 @@ class OsUpdates extends React.Component {
                 type: "error",
                 title: STATE_HEADINGS[this.state.state],
             });
-
             return (
-                <>
+                <Stack>
                     <EmptyStatePanel title={ STATE_HEADINGS[this.state.state] }
-                                     icon={ ExclamationCircleIcon }
-                                     paragraph={
-                                         <TextContent>
-                                             <Text component={TextVariants.p}>
-                                                 {this.state.errorMessages
-                                                         .filter((m, index) => index == 0 || m != this.state.errorMessages[index - 1])
-                                                         .map(m => <span key={m}>{m}</span>)}
-                                             </Text>
-                                             <Text component={TextVariants.p}>
-                                                 {_("Please reload the page after resolving the issue.")}
-                                             </Text>
-                                         </TextContent>
-                                     }
+                                    icon={ ExclamationCircleIcon }
+                                    paragraph={
+                                        <TextContent>
+                                            <Text component={TextVariants.p}>
+                                                {_("Please resolve the issue and reload this page.")}
+                                            </Text>
+                                        </TextContent>
+                                    }
                     />
-                </>
+                    <CodeBlock className='pf-v5-u-mx-auto error-log'>
+                        <CodeBlockCode>
+                            {this.state.errorMessages
+                                    .filter((m, index) => index == 0 || m != this.state.errorMessages[index - 1])
+                                    .map(m => <span key={m}>{m}</span>)}
+                        </CodeBlockCode>
+                    </CodeBlock>
+                </Stack>
             );
 
         case "applying":
@@ -1497,7 +1511,7 @@ class OsUpdates extends React.Component {
                                  actions={this.state.applyActions}
                                  onCancel={ () => PK.call(this.state.applyTransaction, PK.transactionInterface, "Cancel", []) }
                                  rebootAfter={this.state.rebootAfterSuccess}
-                                 setRebootAfter={ enabled => this.setState({ rebootAfterSuccess: enabled }) }
+                                 setRebootAfter={ (_event, enabled) => this.setState({ rebootAfterSuccess: enabled }) }
             />;
 
         case "updateSuccess": {
@@ -1574,24 +1588,22 @@ class OsUpdates extends React.Component {
             });
 
             return (
-                <>
-                    <PageSection>
-                        <Gallery className='ct-cards-grid' hasGutter>
-                            <CardsPage onValueChanged={this.onValueChanged} handleRefresh={this.handleRefresh} {...this.state} />
-                        </Gallery>
-                        { this.state.showRestartServicesDialog &&
-                            <RestartServices tracerPackages={this.state.tracerPackages}
+                <PageSection>
+                    <Gallery className='ct-cards-grid' hasGutter>
+                        <CardsPage onValueChanged={this.onValueChanged} handleRefresh={this.handleRefresh} {...this.state} />
+                    </Gallery>
+                    { this.state.showRestartServicesDialog &&
+                    <RestartServices tracerPackages={this.state.tracerPackages}
                                 close={() => this.setState({ showRestartServicesDialog: false })}
                                 state={this.state.state}
                                 callTracer={(state) => this.callTracer(state)}
                                 onValueChanged={delta => this.setState(delta)}
                                 loadUpdates={this.loadUpdates} />
-                        }
-                        { this.state.showRebootSystemDialog &&
-                            <ShutdownModal onClose={() => this.setState({ showRebootSystemDialog: false })} />
-                        }
-                    </PageSection>
-                </>
+                    }
+                    { this.state.showRebootSystemDialog &&
+                    <ShutdownModal onClose={() => this.setState({ showRebootSystemDialog: false })} />
+                    }
+                </PageSection>
             );
         }
 

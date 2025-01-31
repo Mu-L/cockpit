@@ -14,24 +14,15 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
-import "../lib/patternfly/patternfly-4-cockpit.scss";
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import 'cockpit-dark-theme'; // once per page
 
 import React from 'react';
 import { createRoot } from "react-dom/client";
 import { Application } from './metrics.jsx';
-/*
- * PF4 overrides need to come after the JSX components imports because
- * these are importing CSS stylesheets that we are overriding
- * Having the overrides here will ensure that when mini-css-extract-plugin will extract the CSS
- * out of the dist/index.js and since it will maintain the order of the imported CSS,
- * the overrides will be correctly in the end of our stylesheet.
- */
-import "../lib/patternfly/patternfly-4-overrides.scss";
-import './metrics.scss';
 
 document.addEventListener("DOMContentLoaded", function () {
     const root = createRoot(document.getElementById("app"));

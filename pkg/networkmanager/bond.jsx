@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState, useContext } from 'react';
@@ -132,7 +132,7 @@ export const BondDialog = ({ connection, dev, settings }) => {
         <NetworkModal dialogError={dialogError}
                       idPrefix={idPrefix}
                       onSubmit={onSubmit}
-                      title={_("Bond settings")}
+                      title={!connection ? _("Add bond") : _("Edit bond settings")}
                       help={
                           <Popover
                               headerContent={_("Network bond")}
@@ -148,7 +148,7 @@ export const BondDialog = ({ connection, dev, settings }) => {
                                           variant='link'
                                           isInline
                                           icon={<ExternalLinkSquareAltIcon />} iconPosition="right"
-                                          href="https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/8/html/managing_systems_using_the_rhel_8_web_console/configuring-network-bonds-using-the-web-console_system-management-using-the-rhel-8-web-console">
+                                          href="https://docs.redhat.com/en/documentation/red_hat_enterprise_linux/9/html/configuring_and_managing_networking/configuring-network-bonding_configuring-and-managing-networking#proc_configuring-a-network-bond-by-using-the-rhel-web-console_configuring-network-bonding">
                                       {_("Learn more")}
                                   </Button>
                               }
@@ -158,6 +158,7 @@ export const BondDialog = ({ connection, dev, settings }) => {
                               </Button>
                           </Popover>
                       }
+                      isCreateDialog={!connection}
         >
             <>
                 <Name idPrefix={idPrefix} iface={iface} setIface={setIface} />
@@ -168,13 +169,13 @@ export const BondDialog = ({ connection, dev, settings }) => {
                     <MacMenu idPrefix={idPrefix} model={model} mac={mac} setMAC={setMAC} />
                 </FormGroup>
                 <FormGroup fieldId={idPrefix + "-mode-select"} label={_("Mode")}>
-                    <FormSelect id={idPrefix + "-mode-select"} onChange={setMode}
+                    <FormSelect id={idPrefix + "-mode-select"} onChange={(_, val) => setMode(val)}
                                 value={mode}>
                         {bond_mode_choices.map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                     </FormSelect>
                 </FormGroup>
                 {mode == "active-backup" && <FormGroup fieldId={idPrefix + "-primary-select"} label={_("Primary")}>
-                    <FormSelect id={idPrefix + "-primary-select"} onChange={setPrimary}
+                    <FormSelect id={idPrefix + "-primary-select"} onChange={(_, val) => setPrimary(val)}
                                 value={primary}>
                         <>
                             <FormSelectOption key='-' value={null} label='-' />
@@ -185,24 +186,24 @@ export const BondDialog = ({ connection, dev, settings }) => {
                     </FormSelect>
                 </FormGroup>}
                 <FormGroup fieldId={idPrefix + "-link-monitoring-select"} label={_("Link monitoring")}>
-                    <FormSelect id={idPrefix + "-link-monitoring-select"} onChange={setLinkMonitoring}
+                    <FormSelect id={idPrefix + "-link-monitoring-select"} onChange={(_, val) => setLinkMonitoring(val)}
                                 value={linkMonitoring}>
                         {bond_monitoring_choices.map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                     </FormSelect>
                 </FormGroup>
                 <FormGroup fieldId={idPrefix + "-link-monitoring-interval-input"} label={_("Monitoring interval")}>
-                    <TextInput id={idPrefix + "-link-monitoring-interval-input"} className="network-number-field" value={linkMonitoringInterval} onChange={setLinkMonitoringInterval} />
+                    <TextInput id={idPrefix + "-link-monitoring-interval-input"} className="network-number-field" value={linkMonitoringInterval} onChange={(_event, value) => setLinkMonitoringInterval(value)} />
                 </FormGroup>
                 {linkMonitoring == 'mii' && <>
                     <FormGroup fieldId={idPrefix + "-link-up-delay-input"} label={_("Link up delay")}>
-                        <TextInput id={idPrefix + "-link-up-delay-input"} className="network-number-field" value={linkUpDelay} onChange={setLinkUpDelay} />
+                        <TextInput id={idPrefix + "-link-up-delay-input"} className="network-number-field" value={linkUpDelay} onChange={(_event, value) => setLinkUpDelay(value)} />
                     </FormGroup>
                     <FormGroup fieldId={idPrefix + "-link-down-delay-input"} label={_("Link down delay")}>
-                        <TextInput id={idPrefix + "-link-down-delay-input"} className="network-number-field" value={linkDownDelay} onChange={setLinkDownDelay} />
+                        <TextInput id={idPrefix + "-link-down-delay-input"} className="network-number-field" value={linkDownDelay} onChange={(_event, value) => setLinkDownDelay(value)} />
                     </FormGroup>
                 </>}
                 {linkMonitoring == 'arp' && <FormGroup fieldId={idPrefix + "-monitoring-targets-input"} label={_("Monitoring targets")}>
-                    <TextInput id={idPrefix + "-monitoring-targets-input"} value={monitoringTargets} onChange={setMonitoringTargets} />
+                    <TextInput id={idPrefix + "-monitoring-targets-input"} value={monitoringTargets} onChange={(_event, value) => setMonitoringTargets(value)} />
                 </FormGroup>}
             </>
         </NetworkModal>

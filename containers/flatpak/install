@@ -18,8 +18,14 @@ cd tmp
 
 MANIFEST="$(../containers/flatpak/prepare)"
 
-flatpak-builder \
-    "$@" \
-    --disable-rofiles-fuse \
-    --force-clean \
-    --install flatpak-build-dir "${MANIFEST}"
+flatpak run \
+    org.flatpak.Builder \
+        "$@" \
+        --force-clean \
+        --install flatpak-build-dir "${MANIFEST}"
+
+flatpak run \
+    --command=flatpak-builder-lint \
+    org.flatpak.Builder \
+        --exceptions \
+        builddir flatpak-build-dir

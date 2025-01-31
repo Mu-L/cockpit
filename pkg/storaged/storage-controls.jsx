@@ -14,23 +14,23 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState } from 'react';
 
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
-import { Dropdown, DropdownItem, DropdownToggle, KebabToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { Dropdown, DropdownItem } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
+import { MenuToggle } from '@patternfly/react-core/dist/esm/components/MenuToggle/index.js';
 import { Tooltip, TooltipPosition } from "@patternfly/react-core/dist/esm/components/Tooltip/index.js";
 import { Switch } from "@patternfly/react-core/dist/esm/components/Switch/index.js";
-import { BarsIcon } from '@patternfly/react-icons';
+import { BarsIcon, EllipsisVIcon } from '@patternfly/react-icons';
 
 import cockpit from "cockpit";
 import * as utils from "./utils.js";
 import client from "./client.js";
 
 import { dialog_open } from "./dialog.jsx";
-import { fmt_to_fragments } from "utils.jsx";
 
 const _ = cockpit.gettext;
 
@@ -68,7 +68,7 @@ class StorageControl extends React.Component {
     }
 }
 
-function checked(callback) {
+function checked(callback, setSpinning, excuse) {
     return function (event) {
         if (!event)
             return;
@@ -78,41 +78,58 @@ function checked(callback) {
             return;
 
         // only consider enter button for keyboard events
-        if (event.type === 'keypress' && event.key !== "Enter")
+        if (event.type === 'KeyDown' && event.key !== "Enter")
             return;
 
+        event.stopPropagation();
+
+        if (excuse) {
+            dialog_open({
+                Title: _("Sorry"),
+                Body: excuse
+            });
+            return;
+        }
+
         const promise = client.run(callback);
-        if (promise)
+        if (promise) {
+            if (setSpinning)
+                setSpinning(true);
+            promise.finally(() => {
+                if (setSpinning)
+                    setSpinning(false);
+            });
             promise.catch(function (error) {
+                console.warn(error.toString());
                 dialog_open({
                     Title: _("Error"),
                     Body: error.toString()
                 });
             });
-        event.stopPropagation();
+        }
     };
 }
 
-export const StorageButton = ({ id, kind, excuse, onClick, children, ariaLabel, onlyWide }) => (
-    <StorageControl excuse={excuse}
-                    content={excuse => (
-                        <Button id={id}
-                                aria-label={ariaLabel}
-                                onClick={checked(onClick)}
-                                variant={kind || "secondary"}
-                                isDisabled={!!excuse}
-                                className={onlyWide ? "show-only-when-wide" : null}
-                                style={excuse ? { pointerEvents: 'none' } : null}>
-                            {children}
-                        </Button>
-                    )} />
-);
+export const StorageButton = ({ id, kind, excuse, onClick, children, ariaLabel, spinner }) => {
+    const [spinning, setSpinning] = useState(false);
+
+    return <StorageControl excuse={excuse}
+                           content={excuse => (
+                               <Button id={id}
+                                       aria-label={ariaLabel}
+                                       onClick={checked(onClick, setSpinning)}
+                                       variant={kind || "secondary"}
+                                       isDisabled={!!excuse || (spinner && spinning)}
+                                       isLoading={spinner ? spinning : undefined}>
+                                   {children}
+                               </Button>
+                           )} />;
+};
 
 export const StorageLink = ({ id, excuse, onClick, children }) => (
     <StorageControl excuse={excuse}
                     content={excuse => (
                         <Button onClick={checked(onClick)}
-                                style={excuse ? { pointerEvents: 'none' } : null}
                                 variant="link"
                                 isInline
                                 isDisabled={!!excuse}>
@@ -120,30 +137,6 @@ export const StorageLink = ({ id, excuse, onClick, children }) => (
                         </Button>
                     )} />
 );
-
-/* StorageBlockNavLink - describe a given block device concisely and
-                         allow navigating to its details.
-
-   Properties:
-
-   - client
-   - block
- */
-
-export const StorageBlockNavLink = ({ client, block }) => {
-    if (!block)
-        return null;
-
-    const parts = utils.get_block_link_parts(client, block.path);
-
-    const link = (
-        <Button isInline variant="link" onClick={() => { cockpit.location.go(parts.location) }}>
-            {parts.link}
-        </Button>
-    );
-
-    return <span>{fmt_to_fragments(parts.format, link)}</span>;
-};
 
 // StorageOnOff - OnOff switch for asynchronous actions.
 //
@@ -157,7 +150,7 @@ export class StorageOnOff extends React.Component {
     render() {
         const self = this;
 
-        function onChange(val) {
+        function onChange(_event, val) {
             const promise = self.props.onChange(val);
             if (promise) {
                 promise.catch(error => {
@@ -191,60 +184,84 @@ export class StorageOnOff extends React.Component {
  * in a dangerous color.
  */
 
-export const StorageUsageBar = ({ stats, critical, block, offset, total, small }) => {
+export const StorageUsageBar = ({ stats, critical, block, offset, total, short }) => {
     if (!stats)
         return null;
 
     const fraction = stats[0] / stats[1];
     const off_fraction = offset / stats[1];
     const total_fraction = total / stats[1];
-    const labelText = small ? cockpit.format_bytes(stats[0]) : utils.format_fsys_usage(stats[0], stats[1]);
+    const labelText = utils.format_fsys_usage(stats[0], stats[1]);
 
     return (
-        <div className={"pf-c-progress pf-m-outside pf-m-singleline" + (fraction > critical ? " pf-m-danger" : "") + (small ? " pf-m-sm" : "")}>
-            <div className="pf-c-progress__status" aria-hidden="true">
-                <span className="pf-c-progress__measure">{labelText}</span>
-            </div>
-            <div className="pf-c-progress__bar ct-thin-progress" role="progressbar"
-                 aria-valuemin="0" aria-valuemax={stats[1]} aria-valuenow={stats[0]}
+        <div>
+            <span className="usage-text pf-v5-u-text-nowrap">
+                {labelText}
+            </span>
+            <div className={"usage-bar" + (fraction > critical ? " usage-bar-danger" : "") + (short ? " usage-bar-short" : "")}
+                 role="progressbar"
+                 aria-valuemin={0} aria-valuemax={stats[1]} aria-valuenow={stats[0]}
                  aria-label={cockpit.format(_("Usage of $0"), block)}
                  aria-valuetext={labelText}>
-                <div className="pf-c-progress__indicator ct-progress-other" aria-hidden="true" style={{ width: total_fraction * 100 + "%" }} />
-                <div className="pf-c-progress__indicator" style={{ left: off_fraction * 100 + "%", width: fraction * 100 + "%" }} />
+                <div className="usage-bar-indicator usage-bar-other" aria-hidden="true" style={{ width: total_fraction * 100 + "%" }} />
+                <div className="usage-bar-indicator" style={{ insetInlineStart: off_fraction * 100 + "%", width: fraction * 100 + "%" }} />
             </div>
         </div>);
 };
 
-export const StorageMenuItem = ({ onClick, onlyNarrow, danger, children }) => (
-    <DropdownItem className={(onlyNarrow ? "show-only-when-narrow" : "") + (danger ? " delete-resource-red" : "")}
-                  onKeyPress={checked(onClick)}
-                  onClick={checked(onClick)}>
+/* Render a static size that goes well with a short StorageusageBar in
+   the same table column, and also works well with the tests.
+*/
+
+export const StorageSize = ({ size }) => {
+    return (
+        <div>
+            <span className="usage-text pf-v5-u-text-nowrap">
+                {utils.fmt_size(size)}
+            </span>
+            <div className="usage-bar usage-bar-short usage-bar-empty" />
+        </div>);
+};
+
+export const StorageMenuItem = ({ onClick, danger, excuse, children }) => (
+    <DropdownItem className={danger && !excuse ? " delete-resource-dangerous" : ""}
+                  description={excuse}
+                  isDisabled={!!excuse}
+                  onClick={checked(onClick, null, excuse)}>
         {children}
     </DropdownItem>
 );
 
-export const StorageBarMenu = ({ label, isKebab, onlyNarrow, menuItems }) => {
+export const StorageBarMenu = ({ label, isKebab, menuItems }) => {
     const [isOpen, setIsOpen] = useState(false);
 
     if (!client.superuser.allowed)
         return null;
 
-    let toggle;
-    if (isKebab)
-        toggle = <KebabToggle onToggle={setIsOpen} />;
-    else
-        toggle = <DropdownToggle className="pf-m-primary" toggleIndicator={null}
-                                 onToggle={setIsOpen} aria-label={label}>
-            <BarsIcon color="white" />
-        </DropdownToggle>;
+    const onToggleClick = (event) => {
+        setIsOpen(!isOpen);
+    };
+
+    const onSelect = (event) => {
+        setIsOpen(false);
+    };
+
+    const toggle = ref => <MenuToggle ref={ref}
+                                      variant="plain"
+                                      className={isKebab ? "" : "pf-m-primary"}
+                                      onClick={onToggleClick}
+                                      isExpanded={isOpen}
+                                      aria-label={label}>
+        {isKebab ? <EllipsisVIcon /> : <BarsIcon color="white" />}
+    </MenuToggle>;
 
     return (
-        <Dropdown className={onlyNarrow ? "show-only-when-narrow" : null}
-                  onSelect={() => setIsOpen(!isOpen)}
+        <Dropdown isOpen={isOpen}
+                  onSelect={onSelect}
+                  onOpenChange={isOpen => setIsOpen(isOpen)}
                   toggle={toggle}
-                  isOpen={isOpen}
-                  isPlain
-                  position="right"
-                  dropdownItems={menuItems} />
-    );
+                  popperProps={{ position: "right" }}
+                  shouldFocusToggleOnSelect>
+            {menuItems}
+        </Dropdown>);
 };

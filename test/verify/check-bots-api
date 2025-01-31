@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,7 +15,7 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 import json
 import os
@@ -25,13 +25,11 @@ import tempfile
 import unittest
 from glob import glob
 
-import parent  # noqa: F401
-import testvm
-from testlib import skipDistroPackage, test_main
+import testlib
+from machine import testvm
 
 
 @unittest.skipUnless("TEST_OS" in os.environ, "TEST_OS not set")
-@skipDistroPackage()
 class TestImageCustomize(unittest.TestCase):
 
     def checkBoot(self, image):
@@ -120,15 +118,14 @@ class TestImageCustomize(unittest.TestCase):
 
         with testvm.Timeout(seconds=300, error_message="Timed out waiting for image-customize"):
             subprocess.check_call(["bots/image-customize", "--verbose",
-                                   "--resize", "20G", img])
+                                   "--resize", "30G", img])
 
         output = subprocess.check_output(["qemu-img", "info", "--output=json", img], encoding="utf-8")
         info = json.loads(output)
-        self.assertEqual(int(info['virtual-size']) // 1024 // 1024 // 1024, 20)
+        self.assertEqual(int(info['virtual-size']) // 1024 // 1024 // 1024, 30)
 
 
 @unittest.skipUnless("TEST_OS" in os.environ, "TEST_OS not set")
-@skipDistroPackage()
 class TestBotsVM(unittest.TestCase):
 
     def testBasic(self):
@@ -155,7 +152,7 @@ class TestBotsVM(unittest.TestCase):
         # test SSH command and that we have the expected flag file
         self.assertEqual(ssh_command[0], "ssh")
         with testvm.Timeout(seconds=30, error_message="Timed out waiting for ssh command"):
-            out = subprocess.check_output(ssh_command + ["cat", "/var/custom-test"])
+            out = subprocess.check_output([*ssh_command, "cat", "/var/custom-test"])
         self.assertEqual(out, b"hello\n")
 
         # should cleanly stop on SIGTERM
@@ -165,4 +162,4 @@ class TestBotsVM(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

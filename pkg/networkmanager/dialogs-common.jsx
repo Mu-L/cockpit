@@ -14,17 +14,17 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useContext, useEffect, useState } from 'react';
 import cockpit from 'cockpit';
+import * as packagekit from 'packagekit.js';
 
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox/index.js";
 import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
-import { Select, SelectOption, SelectVariant } from "@patternfly/react-core/dist/esm/components/Select/index.js";
 import { Stack } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 
@@ -35,11 +35,15 @@ import { IpSettingsDialog } from './ip-settings.jsx';
 import { TeamDialog, getGhostSettings as getTeamGhostSettings } from './team.jsx';
 import { TeamPortDialog } from './teamport.jsx';
 import { VlanDialog, getGhostSettings as getVlanGhostSettings } from './vlan.jsx';
+import { WireGuardDialog, getWireGuardGhostSettings } from './wireguard.jsx';
 import { MtuDialog } from './mtu.jsx';
 import { MacDialog } from './mac.jsx';
 import { ModalError } from 'cockpit-components-inline-notification.jsx';
 import { ModelContext } from './model-context.jsx';
 import { useDialogs } from "dialogs.jsx";
+import { install_dialog } from "cockpit-components-install-dialog.jsx";
+import { read_os_release } from "os-release.js";
+import { TypeaheadSelect } from "cockpit-components-typeahead-select";
 
 import {
     apply_group_member,
@@ -55,78 +59,67 @@ const _ = cockpit.gettext;
 const NM_CAPABILITY_TEAM = 1;
 
 export const MacMenu = ({ idPrefix, model, mac, setMAC }) => {
-    const [isOpen, setIsOpen] = useState(false);
     const [optionsMap, setOptionsMap] = useState([]);
 
     useEffect(() => {
-        const optionsMapInit = [];
-
+        // Find all macs and the interfaces that use them.
+        const macs = {};
         model.list_interfaces().forEach(iface => {
             if (iface.Device && iface.Device.HwAddress && iface.Device.HwAddress !== "00:00:00:00:00:00") {
-                optionsMapInit.push({
-                    toString: () => cockpit.format("$0 ($1)", iface.Device.HwAddress, iface.Name),
-                    value: iface.Device.HwAddress
-                });
+                if (!macs[iface.Device.HwAddress])
+                    macs[iface.Device.HwAddress] = [];
+                macs[iface.Device.HwAddress].push(iface.Name);
             }
         });
+
+        const optionsMapInit = [];
+        Object.keys(macs).sort().forEach(mac => {
+            optionsMapInit.push({
+                content: cockpit.format("$0 ($1)", mac, macs[mac].join(", ")),
+                value: mac,
+            });
+        });
+
         optionsMapInit.push(
-            { toString: () => _("Permanent"), value: "permanent" },
-            { toString: () => _("Preserve"), value: "preserve" },
-            { toString: () => _("Random"), value: "random" },
-            { toString: () => _("Stable"), value: "stable" },
+            { content: _("Permanent"), value: "permanent" },
+            { content: _("Preserve"), value: "preserve" },
+            { content: _("Random"), value: "random" },
+            { content: _("Stable"), value: "stable" },
         );
         setOptionsMap(optionsMapInit);
     }, [model]);
 
     const clearSelection = () => {
         setMAC(undefined);
-        setIsOpen(false);
     };
 
     const onSelect = (_, selection) => {
-        if (typeof selection == 'object')
-            setMAC(selection.value);
-        else
-            setMAC(selection);
-        setIsOpen(false);
-    };
-
-    const onCreateOption = newValue => {
-        setOptionsMap([...optionsMap, { value: newValue, toString: () => newValue }]);
+        setMAC(selection);
     };
 
     return (
-        <Select createText={_("Use")}
-                isCreatable
-                isOpen={isOpen}
-                menuAppendTo={() => document.body}
-                onClear={clearSelection}
-                onCreateOption={onCreateOption}
-                onSelect={onSelect}
-                onToggle={value => setIsOpen(value)}
-                selections={optionsMap.find(option => option.value == mac)}
-                variant={SelectVariant.typeahead}
-                toggleId={idPrefix + "-mac-input"}
-        >
-            {optionsMap.map((option, index) => (
-                <SelectOption key={index}
-                              value={option}
-                />
-            ))}
-        </Select>
+        <TypeaheadSelect toggleProps={{ id: idPrefix + "-mac-input" }}
+                         isScrollable
+                         placeholder=""
+                         isCreatable
+                         createOptionMessage={val => cockpit.format(_("Use $0"), val)}
+                         onClearSelection={clearSelection}
+                         onSelect={onSelect}
+                         selected={mac}
+                         selectOptions={optionsMap} />
     );
 };
 
 export const MemberInterfaceChoices = ({ idPrefix, memberChoices, setMemberChoices, model, group }) => {
     return (
-        <Stack hasGutter id={idPrefix + "-interface-members-list"}>
+        <Stack id={idPrefix + "-interface-members-list"}>
             {Object.keys(memberChoices).map((iface, idx) => (
                 <Checkbox data-iface={iface}
                           id={idPrefix + "-interface-members-" + iface}
                           isChecked={memberChoices[iface]}
                           key={iface}
                           label={iface}
-                          onChange={checked => setMemberChoices({ ...memberChoices, [iface]: checked })}
+                          onChange={(_event, checked) => setMemberChoices({ ...memberChoices, [iface]: checked })}
                 />
             ))}
         </Stack>
@@ -136,12 +129,12 @@ export const MemberInterfaceChoices = ({ idPrefix, memberChoices, setMemberChoic
 export const Name = ({ idPrefix, iface, setIface }) => {
     return (
         <FormGroup fieldId={idPrefix + "-interface-name-input"} label={_("Name")}>
-            <TextInput id={idPrefix + "-interface-name-input"} value={iface} onChange={setIface} />
+            <TextInput id={idPrefix + "-interface-name-input"} value={iface} onChange={(_event, value) => setIface(value)} />
         </FormGroup>
     );
 };
 
-export const NetworkModal = ({ dialogError, help, idPrefix, title, onSubmit, children, isFormHorizontal }) => {
+export const NetworkModal = ({ dialogError, help, idPrefix, title, onSubmit, children, isFormHorizontal, isCreateDialog, submitDisabled = false }) => {
     const Dialogs = useDialogs();
 
     return (
@@ -152,8 +145,8 @@ export const NetworkModal = ({ dialogError, help, idPrefix, title, onSubmit, chi
             title={title}
             footer={
                 <>
-                    <Button variant='primary' id={idPrefix + "-save"} onClick={onSubmit}>
-                        {_("Save")}
+                    <Button variant='primary' id={idPrefix + "-save"} onClick={onSubmit} isDisabled={submitDisabled}>
+                        {isCreateDialog ? _("Add") : _("Save")}
                     </Button>
                     <Button variant='link' id={idPrefix + "-cancel"} onClick={Dialogs.close}>
                         {_("Cancel")}
@@ -198,9 +191,25 @@ export const NetworkAction = ({ buttonText, iface, connectionSettings, type }) =
         if (type == 'vlan') settings = getVlanGhostSettings();
         if (type == 'team') settings = getTeamGhostSettings({ newIfaceName });
         if (type == 'bridge') settings = getBridgeGhostSettings({ newIfaceName });
+        if (type == 'wg') settings = getWireGuardGhostSettings({ newIfaceName });
     }
 
     const properties = { connection: con, dev, settings };
+
+    async function resolveDeps(type) {
+        if (type === 'wg') {
+            try {
+                await cockpit.script("command -v wg");
+            } catch {
+                const packagekitExits = await packagekit.detect();
+                const os_release = await read_os_release();
+
+                // RHEL 8 does not have wireguard-tools
+                if (packagekitExits && os_release.PLATFORM_ID !== "platform:el8")
+                    await install_dialog("wireguard-tools");
+            }
+        }
+    }
 
     function show() {
         let dlg = null;
@@ -212,6 +221,8 @@ export const NetworkAction = ({ buttonText, iface, connectionSettings, type }) =
             dlg = <TeamDialog {...properties} />;
         else if (type == 'bridge')
             dlg = <BridgeDialog {...properties} />;
+        else if (type == 'wg')
+            dlg = <WireGuardDialog {...properties} />;
         else if (type == 'mtu')
             dlg = <MtuDialog {...properties} />;
         else if (type == 'mac')
@@ -224,30 +235,32 @@ export const NetworkAction = ({ buttonText, iface, connectionSettings, type }) =
             dlg = <IpSettingsDialog topic="ipv4" {...properties} />;
         else if (type == 'ipv6')
             dlg = <IpSettingsDialog topic="ipv6" {...properties} />;
+
         if (dlg)
-            Dialogs.show(dlg);
+            resolveDeps(type)
+                    .then(() => Dialogs.show(dlg))
+                    .catch(err => console.error("NetworkAction Dialog failed:", err)); // not-covered: OS error
     }
 
     return (
-        <>
-            <Button id={"networking-" + (!iface ? "add-" : "edit-") + type}
-                    isInline={!!iface}
-                    onClick={syn_click(model, show)}
-                    variant={!iface ? "secondary" : "link"}>
-                {buttonText || _("edit")}
-            </Button>
-        </>
+        <Button id={"networking-" + (!iface ? "add-" : "edit-") + type}
+                isInline={!!iface}
+                onClick={syn_click(model, show)}
+                variant={!iface ? "secondary" : "link"}>
+            {buttonText || _("edit")}
+        </Button>
     );
 };
 
 function reactivateConnection({ con, dev }) {
     if (con.Settings.connection.interface_name &&
         con.Settings.connection.interface_name != dev.Interface) {
-        return dev.disconnect().then(function () { return con.activate(null, null) })
-                .fail(show_unexpected_error);
+        return dev.disconnect()
+                .then(() => con.activate(null, null))
+                .catch(show_unexpected_error);
     } else {
         return con.activate(dev, null)
-                .fail(show_unexpected_error);
+                .catch(show_unexpected_error);
     }
 }
 
@@ -288,14 +301,18 @@ export const dialogSave = ({ model, dev, connection, members, membersInit, setti
                                      rollback_on_failure: type !== 'vlan' && membersChanged
                                  });
     } else {
-        with_checkpoint(
-            model,
-            modify,
-            {
-                fail_text: cockpit.format(_("Creating this $0 will break the connection to the server, and will make the administration UI unavailable."), type == 'vlan' ? 'VLAN' : type),
-                anyway_text: _("Create it"),
-                hack_does_add_or_remove: true,
-                rollback_on_failure: type != 'vlan',
-            });
+        try {
+            with_checkpoint(
+                model,
+                modify,
+                {
+                    fail_text: cockpit.format(_("Creating this $0 will break the connection to the server, and will make the administration UI unavailable."), type == 'vlan' ? 'VLAN' : type),
+                    anyway_text: _("Create it"),
+                    hack_does_add_or_remove: true,
+                    rollback_on_failure: type != 'vlan',
+                });
+        } catch (e) {
+            setDialogError(typeof e === 'string' ? e : e.message);
+        }
     }
 };

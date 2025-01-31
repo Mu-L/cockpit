@@ -14,20 +14,21 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
 import React from 'react';
 import { Flex } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
-import { Form, FormGroup, FormHelperText } from "@patternfly/react-core/dist/esm/components/Form/index.js";
+import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
 import { Radio } from "@patternfly/react-core/dist/esm/components/Radio/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 import { DatePicker } from "@patternfly/react-core/dist/esm/components/DatePicker/index.js";
 
 import { has_errors } from "./dialog-utils.js";
 import { show_modal_dialog, apply_modal_dialog } from "cockpit-components-dialog.jsx";
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
+import { FormHelper } from "cockpit-components-form-helper";
 
 const _ = cockpit.gettext;
 
@@ -58,10 +59,7 @@ function AccountExpirationDialogBody({ state, errors, change, validate, update }
                            </Flex>
                        }
                        isChecked={mode == "expires"} onChange={() => change("mode", "expires")} />
-                {errors?.date &&
-                <FormHelperText isError isHidden={false}>
-                    {errors.date}
-                </FormHelperText>}
+                <FormHelper helperTextInvalid={errors?.date} />
             </FormGroup>
         </Form>
     );
@@ -75,7 +73,7 @@ export function account_expiration_dialog(account, expire_date) {
     const state = {
         mode: expire_date ? "expires" : "never",
         before: parts,
-        date: expire_date?.toISOString().substr(0, 10) ?? ""
+        date: expire_date?.toISOString().substring(0, 10) ?? ""
     };
 
     let errors = { };
@@ -121,11 +119,11 @@ export function account_expiration_dialog(account, expire_date) {
                             const prog = ["/usr/sbin/usermod", "-e"];
                             if (state.mode == "expires") {
                                 const date = new Date(state.date + "T12:00:00Z");
-                                prog.push(date.toISOString().substr(0, 10));
+                                prog.push(date.toISOString().substring(0, 10));
                             } else
                                 prog.push("");
                             prog.push(account.name);
-                            return cockpit.spawn(prog, { superuser: true, err: "message" });
+                            return cockpit.spawn(prog, { superuser: "require", err: "message" });
                         } else {
                             update();
                             return Promise.reject();
@@ -160,14 +158,11 @@ function PasswordExpirationDialogBody({ state, errors, change }) {
                            <span id="password-expiration-before">{before}</span>
                            <TextInput className="size-text-ct" id="password-expiration-input"
                                   validated={(errors?.days) ? "error" : "default"}
-                                  value={days} onChange={value => change("days", value)} isDisabled={mode != "expires"} />
+                                  value={days} onChange={(_event, value) => change("days", value)} isDisabled={mode != "expires"} />
                            <span id="password-expiration-after">{after}</span>
                        </>}
                        isChecked={mode == "expires"} onChange={() => change("mode", "expires")} />
-                {(errors?.days) &&
-                <FormHelperText isError isHidden={false}>
-                    {errors.days}
-                </FormHelperText>}
+                <FormHelper helperTextInvalid={errors?.days} />
             </FormGroup>
         </Form>
     );
@@ -225,7 +220,7 @@ export function password_expiration_dialog(account, expire_days) {
                         if (validate()) {
                             const days = state.mode == "expires" ? parseInt(state.days) : 99999;
                             return cockpit.spawn(["passwd", "-x", String(days), account.name],
-                                                 { superuser: true, err: "message" });
+                                                 { superuser: "require", err: "message" });
                         } else {
                             update();
                             return Promise.reject();

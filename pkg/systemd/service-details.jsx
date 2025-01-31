@@ -14,19 +14,19 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
-import { Dropdown, DropdownItem, DropdownSeparator, KebabToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { DropdownItem } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
+import { Divider } from '@patternfly/react-core/dist/esm/components/Divider/index.js';
 import { Flex } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { ExpandableSection } from "@patternfly/react-core/dist/esm/components/ExpandableSection/index.js";
 import { Tooltip, TooltipPosition } from "@patternfly/react-core/dist/esm/components/Tooltip/index.js";
-import { Card, CardBody, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
-import { Text, TextVariants } from "@patternfly/react-core/dist/esm/components/Text/index.js";
+import { Card, CardHeader, CardBody, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
 import { List, ListItem } from "@patternfly/react-core/dist/esm/components/List/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
 import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
@@ -48,6 +48,7 @@ import { useDialogs, DialogsContext } from "dialogs.jsx";
 import { ModalError } from 'cockpit-components-inline-notification.jsx';
 
 import './service-details.scss';
+import { KebabDropdown } from "cockpit-components-dropdown";
 
 const _ = cockpit.gettext;
 const METRICS_POLL_DELAY = 30000; // 30s
@@ -117,7 +118,6 @@ const ServiceConfirmDialog = ({ id, title, message, confirmText, confirmAction }
  */
 const ServiceActions = ({ masked, active, failed, canReload, actionCallback, deleteActionCallback, fileActionCallback, disabled, isPinned, pinUnitCallback }) => {
     const Dialogs = useDialogs();
-    const [isActionOpen, setIsActionOpen] = useState(false);
 
     const actions = [];
 
@@ -146,7 +146,7 @@ const ServiceActions = ({ masked, active, failed, canReload, actionCallback, del
         }
 
         if (deleteActionCallback) {
-            actions.push(<DropdownSeparator key="delete-divider" />);
+            actions.push(<Divider key="delete-divider" />);
             actions.push(
                 <DropdownItem key="delete" className="pf-m-danger" onClick={() => deleteActionCallback()}>{ _("Delete") }</DropdownItem>
             );
@@ -154,7 +154,7 @@ const ServiceActions = ({ masked, active, failed, canReload, actionCallback, del
 
         if (actions.length > 0) {
             actions.push(
-                <DropdownSeparator key="divider" />
+                <Divider key="divider" />
             );
         }
 
@@ -180,21 +180,14 @@ const ServiceActions = ({ masked, active, failed, canReload, actionCallback, del
             <DropdownItem key="mask" onClick={confirm}>{ _("Disallow running (mask)") }</DropdownItem>
         );
 
-        actions.push(<DropdownSeparator key="pin-divider" />);
+        actions.push(<Divider key="pin-divider" />);
         actions.push(
             <DropdownItem key="pin" onClick={() => pinUnitCallback() }>{isPinned ? _("Unpin unit") : _("Pin unit")}</DropdownItem>
         );
     }
 
     return (
-        <Dropdown id="service-actions" title={ _("Additional actions") }
-                  toggle={<KebabToggle isDisabled={disabled}
-                                       onToggle={setIsActionOpen} />}
-                  isOpen={isActionOpen}
-                  isPlain
-                  onSelect={() => setIsActionOpen(!isActionOpen)}
-                  position='right'
-                  dropdownItems={actions} />
+        <KebabDropdown id="service-actions" dropdownItems={actions} isDisabled={disabled} title={ _("Additional actions") } />
     );
 };
 
@@ -525,7 +518,7 @@ export class ServiceDetails extends React.Component {
         if (this.state.waitsAction || this.state.waitsFileAction) {
             status = [
                 <div key="updating" className="status-updating">
-                    <Spinner isSVG size="md" className="status-icon" />
+                    <Spinner size="md" className="status-icon" />
                     <span className="status">{ _("Updating status...") }</span>
                 </div>
             ];
@@ -543,13 +536,9 @@ export class ServiceDetails extends React.Component {
                 icon={ExclamationCircleIcon}
                 title={title}
                 paragraph={this.props.unitId}
-                action={
-                    <Button variant="link"
-                            component="a"
-                            onClick={() => cockpit.jump(path, cockpit.transport.host)}>
-                        {_("View all services")}
-                    </Button>
-                }
+                action={_("View all services")}
+                actionVariant="link"
+                onAction={() => cockpit.jump(path, cockpit.transport.host)}
             />;
         }
 
@@ -607,7 +596,7 @@ export class ServiceDetails extends React.Component {
             });
 
         return (
-            <Card>
+            <Card id="service-details-unit" className="ct-card">
                 { this.state.showDeleteDialog &&
                 <DeleteModal
                     name={this.props.unit.Description}
@@ -622,73 +611,75 @@ export class ServiceDetails extends React.Component {
                     }
                 />
                 }
-                <CardTitle className="service-top-panel">
-                    <Text component={TextVariants.h2} className="service-name">{this.props.unit.Description}</Text>
-                    {this.state.isPinned &&
+                <CardHeader>
+                    <Flex className="service-top-panel" spaceItems={{ default: 'spaceItemsMd' }} alignItems={{ default: 'alignItemsCenter' }}>
+                        <CardTitle component="h2" className="service-name">{this.props.unit.Description}</CardTitle>
+                        {this.state.isPinned &&
                         <Tooltip content={_("Pinned unit")}>
                             <ThumbtackIcon className='service-thumbtack-icon' />
                         </Tooltip>}
-                    { showAction &&
-                        <>
-                            { !masked && !isStatic &&
-                                <Tooltip id="switch-unit-state" content={tooltipMessage} position={TooltipPosition.right}>
-                                    <span>
+                        { showAction &&
+                            <>
+                                { !masked && !isStatic &&
+                                    <Tooltip id="switch-unit-state" content={tooltipMessage} position={TooltipPosition.right}>
                                         <Switch isChecked={enabled}
                                                 aria-label={tooltipMessage}
                                                 isDisabled={this.state.waitsAction || this.state.waitsFileAction}
                                                 onChange={this.onOnOffSwitch} />
-                                    </span>
-                                </Tooltip>
-                            }
-                            <ServiceActions { ...{ active, failed, enabled, masked } } canReload={this.props.unit.CanReload}
-                                            actionCallback={this.unitAction} fileActionCallback={this.unitFileAction}
-                                            deleteActionCallback={isCustom && isTimer ? this.deleteAction : null}
-                                            disabled={this.state.waitsAction || this.state.waitsFileAction}
-                                            isPinned={this.state.isPinned} pinUnitCallback={this.pinUnit} />
-                        </>
-                    }
-                </CardTitle>
+                                    </Tooltip>
+                                }
+                                <ServiceActions { ...{ active, failed, enabled, masked } } canReload={this.props.unit.CanReload}
+                                                actionCallback={this.unitAction} fileActionCallback={this.unitFileAction}
+                                                deleteActionCallback={isCustom && isTimer ? this.deleteAction : null}
+                                                disabled={this.state.waitsAction || this.state.waitsFileAction}
+                                                isPinned={this.state.isPinned} pinUnitCallback={this.pinUnit} />
+                            </>
+                        }
+                    </Flex>
+                </CardHeader>
                 <CardBody>
-                    <DescriptionList isHorizontal>
-                        <DescriptionListGroup>
-                            <DescriptionListTerm>{ _("Status") }</DescriptionListTerm>
-                            <DescriptionListDescription id="statuses">
-                                { status }
-                            </DescriptionListDescription>
-                        </DescriptionListGroup>
-                        <DescriptionListGroup>
-                            <DescriptionListTerm>{ _("Path") }</DescriptionListTerm>
-                            <DescriptionListDescription id="path">{this.props.unit.FragmentPath}</DescriptionListDescription>
-                        </DescriptionListGroup>
-                        {unit.MemoryCurrent
-                            ? <DescriptionListGroup>
-                                <DescriptionListTerm>{ _("Memory") }</DescriptionListTerm>
-                                <DescriptionListDescription id="memory">{cockpit.format_bytes(unit.MemoryCurrent)}</DescriptionListDescription>
-                            </DescriptionListGroup>
-                            : null}
-                        {this.props.unit.Listen && this.props.unit.Listen.length && <DescriptionListGroup>
-                            <DescriptionListTerm>{ _("Listen") }</DescriptionListTerm>
-                            <DescriptionListDescription id="listen">
-                                {cockpit.format("$0 ($1)", this.props.unit.Listen[0][1], this.props.unit.Listen[0][0])}
-                            </DescriptionListDescription>
-                        </DescriptionListGroup>}
-                        { notMetConditions.length > 0 &&
+                    <Stack hasGutter>
+                        <DescriptionList isHorizontal>
                             <DescriptionListGroup>
-                                <DescriptionListTerm className="failed">{ _("Condition failed") }</DescriptionListTerm>
-                                <DescriptionListDescription id="condition">
-                                    {notMetConditions.map(cond => <div key={cond}>{cond}</div>)}
+                                <DescriptionListTerm>{ _("Status") }</DescriptionListTerm>
+                                <DescriptionListDescription id="statuses">
+                                    { status }
                                 </DescriptionListDescription>
                             </DescriptionListGroup>
-                        }
-                        {triggerRelationshipsList}
-                    </DescriptionList>
-                    {extraRelationshipsList.length
-                        ? <ExpandableSection id="service-details-show-relationships" toggleText={triggerRelationshipsList.length ? _("Show more relationships") : _("Show relationships")}>
-                            <DescriptionList isHorizontal>
-                                {extraRelationshipsList}
-                            </DescriptionList>
-                        </ExpandableSection>
-                        : null}
+                            <DescriptionListGroup>
+                                <DescriptionListTerm>{ _("Path") }</DescriptionListTerm>
+                                <DescriptionListDescription id="path">{this.props.unit.FragmentPath}</DescriptionListDescription>
+                            </DescriptionListGroup>
+                            {unit.MemoryCurrent
+                                ? <DescriptionListGroup>
+                                    <DescriptionListTerm>{ _("Memory") }</DescriptionListTerm>
+                                    <DescriptionListDescription id="memory">{cockpit.format_bytes(unit.MemoryCurrent)}</DescriptionListDescription>
+                                </DescriptionListGroup>
+                                : null}
+                            {this.props.unit.Listen && this.props.unit.Listen.length && <DescriptionListGroup>
+                                <DescriptionListTerm>{ _("Listen") }</DescriptionListTerm>
+                                <DescriptionListDescription id="listen">
+                                    {cockpit.format("$0 ($1)", this.props.unit.Listen[0][1], this.props.unit.Listen[0][0])}
+                                </DescriptionListDescription>
+                            </DescriptionListGroup>}
+                            { notMetConditions.length > 0 &&
+                                <DescriptionListGroup>
+                                    <DescriptionListTerm className="failed">{ _("Condition failed") }</DescriptionListTerm>
+                                    <DescriptionListDescription id="condition">
+                                        {notMetConditions.map(cond => <div key={cond}>{cond}</div>)}
+                                    </DescriptionListDescription>
+                                </DescriptionListGroup>
+                            }
+                            {triggerRelationshipsList}
+                        </DescriptionList>
+                        {extraRelationshipsList.length
+                            ? <ExpandableSection id="service-details-show-relationships" toggleText={triggerRelationshipsList.length ? _("Show more relationships") : _("Show relationships")}>
+                                <DescriptionList isHorizontal>
+                                    {extraRelationshipsList}
+                                </DescriptionList>
+                            </ExpandableSection>
+                            : null}
+                    </Stack>
                 </CardBody>
             </Card>
         );

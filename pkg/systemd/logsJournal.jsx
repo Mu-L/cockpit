@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -51,7 +51,6 @@ export class JournalBox extends React.Component {
         };
 
         this.appendEntries = this.appendEntries.bind(this);
-        this.currentServices = new Set();
         this.followingProcs = [];
         this.loadServiceFilters = this.loadServiceFilters.bind(this);
         this.prependEntries = this.prependEntries.bind(this);
@@ -137,7 +136,7 @@ export class JournalBox extends React.Component {
                 .done(() => {
                     this.setState({ streamFinished: true });
 
-                    if (!last) {
+                    if (!last && !promise.stopped) {
                         const journalctlOptions = {
                             boot,
                             count: 0,
@@ -165,18 +164,19 @@ export class JournalBox extends React.Component {
     }
 
     prependEntries(entries) {
-        let newServices = false;
-
         for (let i = 0; i < entries.length; i++) {
             const serviceTag = entries[i].SYSLOG_IDENTIFIER;
             this.renderer.prepend(entries[i]);
-            if (!this.currentServices.has(serviceTag)) {
-                this.currentServices.add(serviceTag);
-                newServices = true;
-            }
-        }
-        if (newServices) {
-            this.props.setCurrentIdentifiers(this.currentServices);
+            // Only update if the service is not yet known
+            if (serviceTag && !this.props.currentIdentifiers.includes(serviceTag))
+                // Due to asynchronous nature it needs to be checked whether this
+                // identifier is not yet defined. The previous check could be omitted
+                // and only this one used but let's try to trigger as few updates as possible
+                this.props.setCurrentIdentifiers(identifiers => {
+                    if (!identifiers.includes(serviceTag))
+                        return [...identifiers, serviceTag];
+                    return identifiers;
+                });
         }
         this.renderer.prepend_flush();
 
@@ -215,7 +215,7 @@ export class JournalBox extends React.Component {
         // Ideally this would use `--output cat --output-fields SYSLOG_IDENTIFIER` and do
         // without `sh -ec`, grep, sort, replaceAll and all of those ugly stuff
         // For that we however need newer systemd that includes https://github.com/systemd/systemd/issues/13937
-        this.currentServices = new Set();
+        const currentServices = new Set();
         const service_options = Object.assign({ output: "verbose" }, options);
         let cmd = journal.build_cmd(match, service_options);
 
@@ -225,7 +225,7 @@ export class JournalBox extends React.Component {
                 .then(entries => {
                     entries.split("\n").forEach(entry => {
                         if (entry)
-                            this.currentServices.add(entry.substr(entry.indexOf('=') + 1));
+                            currentServices.add(entry.substring(entry.indexOf('=') + 1));
                     });
                 })
                 .catch(e => {
@@ -234,7 +234,7 @@ export class JournalBox extends React.Component {
                         console.log("Failed to load services:", e.message);
                 })
                 .finally(() => {
-                    this.props.setCurrentIdentifiers(this.currentServices);
+                    this.props.setCurrentIdentifiers(Array.from(currentServices));
                 });
     }
 
@@ -276,10 +276,11 @@ export class JournalBox extends React.Component {
                     {error}
                     <EmptyStatePanel action={_("Clear all filters")}
                                      icon={ExclamationCircleIcon}
+                                     actionVariant="link"
                                      onAction={() => cockpit.location.go('/')}
                                      paragraph={_("Can not find any logs using the current combination of filters.")}
                                      title={_("No logs found")}
-                                     loading={false} />
+                    />
                 </div>
             );
         }
@@ -287,7 +288,6 @@ export class JournalBox extends React.Component {
             /* Show 'Load earlier entries' button if we didn't reach start yet */
             this.state.didntReachStart
                 ? <EmptyStatePanel action={_("Load earlier entries")}
-                             actionInProgressText={_("Loading earlier entries")}
                              icon={noLogs ? ExclamationCircleIcon : undefined}
                              isActionInProgress={this.state.loading}
                              onAction={() => {
@@ -322,7 +322,7 @@ export class JournalBox extends React.Component {
                              }}
                              paragraph={noLogs ? _("You may try to load older entries.") : ""}
                              title={noLogs ? _("No logs found") : ""}
-                             loading={false} />
+                             loading={this.state.loading} />
                 : null
         );
 

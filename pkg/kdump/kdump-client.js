@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
@@ -161,6 +161,10 @@ export class KdumpClient {
                 });
     }
 
+    exportConfig(settings) {
+        return this.configClient.generateConfig(settings).trim();
+    }
+
     targetFromSettings(settings) {
         const target = {
             type: "unknown",
@@ -171,7 +175,7 @@ export class KdumpClient {
             return target;
 
         // copy first target
-        cockpit.extend(target, Object.values(settings.targets)[0]);
+        Object.assign(target, Object.values(settings.targets)[0]);
         target.multipleTargets = Object.keys(settings.targets).length > 1;
         return target;
     }

@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React from "react";
@@ -128,6 +128,9 @@ export class KpatchSettings extends React.Component {
         const uname_promise = cockpit.spawn(["uname", "-r"])
                 .then(data => {
                     const fields = data.split("-");
+                    // if there's no release field, we don't have an official kernel
+                    if (!fields[1])
+                        return;
                     const kpp_kernel_version = fields[0].replaceAll(".", "_");
                     let release = fields[1].split(".");
                     release = release.slice(0, release.length - 2); // remove el8.x86_64
@@ -150,7 +153,7 @@ export class KpatchSettings extends React.Component {
                                 })
                             );
                 })
-                .catch(console.error);
+                .catch(err => console.error("Could not determine kpatch packages:", JSON.stringify(err))); // not-covered: OS error
 
         return Promise.allSettled([kpatch_promise, uname_promise]);
     }
@@ -233,7 +236,7 @@ export class KpatchSettings extends React.Component {
 
         if (this.state.loaded === false || this.state.patchName === null) {
             // Not yet recognized
-            state = <Spinner isSVG size="md" />;
+            state = <Spinner size="md" />;
         } else if (this.state.unavailable.length > 0) {
             state = <Popover headerContent={ _("Unavailable packages") } bodyContent={ this.state.unavailable.join(", ") }>
                 <span>
@@ -259,7 +262,7 @@ export class KpatchSettings extends React.Component {
         const body = <Form><Checkbox id="apply-kpatch"
                                isChecked={this.state.applyCheckbox}
                                label={_("Apply kernel live patches")}
-                               onChange={checked => this.setState({ applyCheckbox: checked })}
+                               onChange={(_event, checked) => this.setState({ applyCheckbox: checked })}
                                body={<>
                                    <Radio id="current-future"
                                           label={_("for current and future kernels")}
@@ -287,7 +290,7 @@ export class KpatchSettings extends React.Component {
                     </Flex>
                     <Flex>
                         <Button variant="secondary"
-                                isSmall
+                                size="sm"
                                 isDisabled={!this.props.privileged || this.state.updating || !this.state.loaded || this.state.unavailable.length > 0}
                                 onClick={action}>
                             {actionText}
@@ -323,7 +326,7 @@ export class KpatchSettings extends React.Component {
 }
 
 KpatchSettings.propTypes = {
-    privileged: PropTypes.bool.isRequired,
+    privileged: PropTypes.bool,
 };
 
 export class KpatchStatus extends React.Component {

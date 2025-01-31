@@ -14,20 +14,24 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
 import React from "react";
+import 'cockpit-dark-theme'; // once per page
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import "../../node_modules/@patternfly/patternfly/components/Page/page.css";
 
 import { show_modal_dialog } from "cockpit-components-dialog.jsx";
 
 import { PatternDialogBody } from "./react-demo-dialog.jsx";
 import { showCardsDemo } from "./react-demo-cards.jsx";
-import { showFileAcDemo } from "./react-demo-file-autocomplete.jsx";
+import { showUploadDemo } from "./react-demo-file-upload.jsx";
+import { showFileAcDemo, showFileAcDemoPreselected } from "./react-demo-file-autocomplete.jsx";
+import { showTypeaheadDemo } from "./react-demo-typeahead.jsx";
+import { showMultiTypeaheadDemo } from "./react-demo-multi-typeahead.jsx";
 
 /* -----------------------------------------------------------------------------
   Modal Dialog
@@ -122,7 +126,17 @@ document.addEventListener("DOMContentLoaded", function() {
      */
     // File autocomplete
     showFileAcDemo(document.getElementById('demo-file-ac'));
+    showFileAcDemoPreselected(document.getElementById('demo-file-ac-preselected'));
+
+    // Plain typeahead select with headers and dividers
+    showTypeaheadDemo(document.getElementById('demo-typeahead'));
+
+    // Multi typeahead
+    showMultiTypeaheadDemo(document.getElementById('demo-multi-typeahead'));
 
     // Cards
     showCardsDemo(document.getElementById('demo-cards'));
+
+    // Upload
+    showUploadDemo(document.getElementById('demo-upload'));
 });

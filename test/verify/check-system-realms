@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,49 +15,36 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import re
-import time
-import struct
-import hmac
-import hashlib
 import base64
-
-import parent  # noqa: F401
+import hashlib
+import hmac
+import re
+import struct
+import time
 
 import packagelib
-from testlib import (Error, MachineCase, no_retry_when_changed, nondestructive, skipBrowser, skipDistroPackage,
-                     skipImage, skipOstree, todoPybridge, test_main, wait, timeout)
-
+import testlib
 
 WAIT_KRB_SCRIPT = """
 set -ex
-# HACK: This needs to work, but may take a minute
-for x in $(seq 1 60); do
-    if getent passwd {0}; then
-        break
+# Configuring kerberos in sssd takes some time
+for _retry in $(seq 5); do
+    if getent passwd {0} &&
+       ssh -oStrictHostKeyChecking=no -oBatchMode=yes -l {0} x0.cockpit.lan true; then
+        exit 0
     fi
     if systemctl --quiet is-failed sssd.service; then
         systemctl status --lines=100 sssd.service >&2
         exit 1
     fi
     sss_cache -E || true
+    systemctl reset-failed sssd.service
     systemctl restart sssd.service
-    sleep $x
+    sleep 10
 done
-# ensure this works now, if the above loop timed out
-getent passwd {0}
-
-# HACK: This needs to work but may take a minute
-for x in $(seq 1 60); do
-    if ssh -oStrictHostKeyChecking=no -oBatchMode=yes -l {0} x0.cockpit.lan true; then
-        break
-    fi
-    sss_cache -E || true
-    systemctl restart sssd.service
-    sleep $x
-done
+exit 1
 """
 
 # https://en.wikipedia.org/wiki/HMAC-based_One-time_Password_algorithm
@@ -72,21 +59,31 @@ def hotp_token(secret, counter, digits=6, hash_alg=hashlib.sha1):
     return numbers[-digits:].rjust(digits, '0')
 
 
-def setup_fake_chrony(machine):
-    # Our Debian/Ubuntu VM images have systemd-timesyncd installed, which conflicts with chrony.
-    # Set up a mock chrony.service to make ipa-client-install happy
-    machine.write("/run/systemd/system/chrony.service", """
+def maybe_setup_fake_chrony(machine):
+    # Some of our VM images have systemd-timesyncd installed, which
+    # conflicts with chrony.  Set up a mock chrony.service to make
+    # ipa-client-install happy.
+    if machine.execute("type chronyc || echo not-found").strip() == "not-found":
+        machine.write("/run/systemd/system/chrony.service", """
 [Service]
 Type=oneshot
 ExecStart=/bin/true
 """)
-    machine.execute("ln -s /bin/true /usr/bin/chronyc")
-    machine.execute("systemctl unmask chrony")
+        machine.execute("ln -s /bin/true /usr/bin/chronyc")
+        machine.execute("systemctl unmask chrony")
 
 
-@skipDistroPackage()
 class CommonTests:
-    @timeout(900)
+
+    def wait_discover(self):
+        with self.browser.wait_timeout(60):
+            self.browser.wait_attr("#realms-op-address", "data-discover", "done")
+
+    def wait_address_helper(self, expected=None):
+        with self.browser.wait_timeout(60):
+            self.browser.wait_text("#realms-op-address-helper", expected or "Contacted domain")
+
+    @testlib.timeout(900)
     def testQualifiedUsers(self):
         m = self.machine
         b = self.browser
@@ -96,10 +93,8 @@ class CommonTests:
 
         # Test that we reconnect on privileges change
         self.login_and_go("/system", superuser=False)
-        b.click("button:contains('Turn on administrative access')")
-        b.set_input_text("#switch-to-admin-access-password", "foobar")
-        b.click("button:contains('Authenticate')")
-        b.wait_not_present("#switch-to-admin-access-password")
+        b.wait_visible(f"{self.domain_sel}:disabled")
+        b.become_superuser()
 
         def wait_number_domains(n):
             if n == 0:
@@ -110,22 +105,15 @@ class CommonTests:
 
         wait_number_domains(0)
 
-        def set_address():
-            # old realmd/IPA don't support realmd auto-detection yet
-            if m.image == "rhel-8-7":
-                b.wait_attr("#realms-op-address", "data-discover", "done")
-                b.wait_val(self.op_address, "")
-                b.wait_not_present("#realms-op-address-helper")
-                b.set_input_text(self.op_address, "cockpit.lan")
-            else:
-                # on current OSes, domain and suggested admin get auto-detected
+        def wait_domain_detected():
+            with b.wait_timeout(60):
                 b.wait_val(self.op_address, "cockpit.lan")
 
         # Join cockpit.lan
         b.click(self.domain_sel)
         b.wait_popup("realms-join-dialog")
-        set_address()
-        b.wait_text("#realms-op-address-helper", "Contacted domain")
+        wait_domain_detected()
+        self.wait_address_helper()
         # admin gets auto-detected
         b.wait_val(self.op_admin, self.admin_user)
         b.set_input_text(self.op_admin_password, self.admin_password)
@@ -152,18 +140,19 @@ class CommonTests:
         m.execute("! su -c klist " + self.admin_user)
         b.logout()
 
+        # wait until IPA user works
+        m.execute(f'while ! su - -c "echo {self.admin_password} | sudo -S true" {self.admin_user}@cockpit.lan; do '
+                  '    sleep 5; sss_cache -E || true; systemctl reset-failed sssd; systemctl try-restart sssd; done',
+                  timeout=300)
+
         # change existing local "admin" home dir to domain "admin" user
         m.execute(f"chown -R {self.admin_user}@cockpit.lan /home/admin")
-
-        # wait until IPA user works
-        m.execute('while ! su - -c "echo %s | sudo -S true" %s@cockpit.lan; do sleep 5; sss_cache -E || true; systemctl try-restart sssd; done' % (
-                  self.admin_password, self.admin_user), timeout=300)
 
         # log in as domain admin and check that we can do privileged operations
         b.login_and_go('/system/services#/systemd-tmpfiles-clean.timer', user=f'{self.admin_user}@cockpit.lan', password=self.admin_password)
         b.wait_in_text("#statuses", "Running")
-        b.click(".service-top-panel .pf-c-dropdown button")
-        b.click(".service-top-panel .pf-c-dropdown__menu a:contains('Stop')")
+        b.click(".service-top-panel button.pf-v5-c-menu-toggle")
+        b.click(".service-top-panel button.pf-v5-c-menu__item:contains('Stop')")
         b.wait_in_text("#statuses", "Not running")
         # stopping the unit may interrupt the D-Bus proxy inspection of that unit
         self.allow_journal_messages(".*systemd1:.*systemd_2dtmpfiles_2dclean_2etimer: Timeout was reached")
@@ -175,8 +164,8 @@ class CommonTests:
         b.go('/system/services#/systemd-tmpfiles-clean.timer')
         b.enter_page('/system/services')
         b.wait_in_text("#statuses", "Not running")
-        b.click(".service-top-panel .pf-c-dropdown button")
-        b.click(".service-top-panel .pf-c-dropdown__menu a:contains('Start')")
+        b.click(".service-top-panel button.pf-v5-c-menu-toggle")
+        b.click(".service-top-panel button.pf-v5-c-menu__item:contains('Start')")
         b.wait_in_text("#statuses", "Running")
         b.logout()
 
@@ -184,6 +173,10 @@ class CommonTests:
 
         # change home directory ownership back to local user
         m.execute("chown -R admin /home/admin")
+
+        if m.image.startswith("debian"):
+            # HACK: https://bugs.debian.org/1038925
+            m.execute(r"sed -i '/\[ntp\]/,/^$/ d' /var/lib/ipa-client/sysrestore/sysrestore.state")
 
         # Test domain info (PR #11096), leave the domain
         b.login_and_go("/system")
@@ -196,15 +189,15 @@ class CommonTests:
         b.wait_text("#realms-op-info-client-sw", "sssd")
         # leave button should be hidden behind expander by default
         b.wait_not_visible("#realms-op-leave")
-        b.wait_not_visible("#realms-leave-dialog .pf-c-alert")
-        b.click("#realms-leave-dialog .pf-c-expandable-section__toggle")
-        b.wait_visible("#realms-leave-dialog .pf-c-alert")
+        b.wait_not_visible("#realms-leave-dialog .pf-v5-c-alert")
+        b.click("#realms-leave-dialog .pf-v5-c-expandable-section__toggle")
+        b.wait_visible("#realms-leave-dialog .pf-v5-c-alert")
         # caret expander is animated and not reproducible even after a sleep
         # FIXME: there is tons of subpixel noise in the fonts, impossible to match with our naïve algorithm
-        # b.assert_pixels("#realms-leave-dialog", "realm-leave", [".pf-c-expandable-section__toggle-icon"])
+        # b.assert_pixels("#realms-leave-dialog", "realm-leave", [".pf-v5-c-expandable-section__toggle-icon"])
         b.click("#realms-op-leave")
 
-        with b.wait_timeout(30):
+        with b.wait_timeout(60):
             b.wait_not_present("#realms-leave-dialog")
         wait_number_domains(0)
         # re-enables hostname changing
@@ -222,7 +215,7 @@ class CommonTests:
             # Send a wrong password
             b.click(self.domain_sel)
             b.wait_popup("realms-join-dialog")
-            set_address()
+            wait_domain_detected()
             b.wait_val(self.op_admin, self.admin_user)
             b.set_input_text(self.op_admin_password, "foo")
             b.click(f"#realms-join-dialog button{self.primary_btn_class}")
@@ -258,10 +251,9 @@ class CommonTests:
         b.click(self.domain_sel)
         b.wait_popup("realms-join-dialog")
         # wait for auto-detection
-        set_address()
+        wait_domain_detected()
         b.set_input_text(self.op_address, "NOPE")
-        with b.wait_timeout(30):
-            b.wait_text("#realms-op-address-helper", "Domain could not be contacted")
+        self.wait_address_helper("Domain could not be contacted")
         b.wait_visible(f"#realms-join-dialog button{self.primary_btn_class}:disabled")
         b.click("#realms-join-dialog button.pf-m-link")
         b.wait_not_present("#realms-join-dialog")
@@ -269,9 +261,9 @@ class CommonTests:
         # Join a domain with the server as address (input differs from domain name)
         b.click(self.domain_sel)
         b.wait_popup("realms-join-dialog")
-        b.wait_attr("#realms-op-address", "data-discover", "done")
+        self.wait_discover()
         b.set_input_text(self.op_address, "f0.cockpit.lan")
-        b.wait_text("#realms-op-address-helper", "Contacted domain")
+        self.wait_address_helper()
         # admin gets auto-detected
         b.wait_val(self.op_admin, self.admin_user)
         b.set_input_text(self.op_admin_password, self.admin_password)
@@ -283,6 +275,10 @@ class CommonTests:
         self.allow_journal_messages(".*No authentication agent found.*")
         # sometimes polling for info and joining a domain creates this noise
         self.allow_journal_messages('.*org.freedesktop.DBus.Error.Spawn.ChildExited.*')
+        # HACK: idling too long on the login page in Negotiate while waiting for FreeIPA to init
+        # times out in ws and kills cockpit-session; this should be fixed properly in ws
+        self.allow_journal_messages('.*session timed out during authentication')
+        self.allow_journal_messages('.*authentication timed out')
 
     def testUnqualifiedUsers(self):
         m = self.machine
@@ -321,8 +317,8 @@ class CommonTests:
         b.enter_page('/system/services')
 
         b.wait_in_text("#statuses", "Running")
-        b.click(".service-top-panel .pf-c-dropdown button")
-        b.click(".service-top-panel .pf-c-dropdown__menu a:contains('Stop')")
+        b.click(".service-top-panel button.pf-v5-c-menu-toggle")
+        b.click(".service-top-panel button.pf-v5-c-menu__item:contains('Stop')")
         b.wait_in_text("#statuses", "Not running")
 
         b.go('/system')
@@ -334,22 +330,21 @@ class CommonTests:
         b.wait_popup("shutdown-dialog")
         b.click("#delay")
         b.click("button:contains('No delay')")
-        b.wait_text("#delay .pf-c-select__toggle-text", "No delay")
+        b.wait_text("#delay .pf-v5-c-menu-toggle__text", "No delay")
         b.click("#shutdown-dialog button:contains(Reboot)")
         b.switch_to_top()
         b.wait_in_text(".curtains-ct h1", "Disconnected")
-        m.wait_reboot()
+        self.wait_reboot()
 
         self.allow_journal_messages(".*No authentication agent found.*")
-        self.allow_restart_journal_messages()
         # sometimes polling for info and joining a domain creates this noise
         self.allow_journal_messages('.*org.freedesktop.DBus.Error.Spawn.ChildExited.*')
 
     def checkClientCertAuthentication(self):
-        '''Common tests for certificate authentication
+        """Common tests for certificate authentication
 
         This assumes that IdM and sssd are all set up correctly already.
-        '''
+        """
         m = self.machine
         b = self.browser
 
@@ -359,16 +354,17 @@ class CommonTests:
         self.login_and_go("/system")
         b.click("#system_information_domain_button")
         b.wait_popup("realms-join-dialog")
-        b.wait_attr("#realms-op-address", "data-discover", "done")
+        self.wait_discover()
+
         b.set_input_text("#realms-op-address", "cockpit.lan")
-        b.wait_text("#realms-op-address-helper", "Contacted domain")
+        self.wait_address_helper()
         b.set_input_text("#realms-op-admin", self.admin_user)
         b.set_input_text("#realms-op-admin-password", self.admin_password)
         b.click(f"#realms-join-dialog button{self.primary_btn_class}")
         with b.wait_timeout(300):
             b.wait_not_present("#realms-join-dialog")
         b.logout()
-        m.execute('while ! id alice; do sleep 5; systemctl restart sssd; done', timeout=300)
+        m.execute('while ! id alice; do sleep 5; done', timeout=300)
 
         # alice's certificate was written by testClientCertAuthentication()
         alice_cert_key = ['--cert', "/var/tmp/alice.pem", '--key', "/var/tmp/alice.key"]
@@ -383,7 +379,7 @@ class CommonTests:
         # ensure sssd certificate lookup works
         user_obj = m.execute('busctl call org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe/Users '
                              'org.freedesktop.sssd.infopipe.Users FindByCertificate s -- '
-                             '''"$(cat /var/tmp/alice.pem)" | sed 's/^o "//; s/"$//' ''')
+                             """"$(cat /var/tmp/alice.pem)" | sed 's/^o "//; s/"$//' """)
         self.assertEqual(m.execute('busctl get-property org.freedesktop.sssd.infopipe ' + user_obj.strip() +
                                    ' org.freedesktop.sssd.infopipe.Users.User name').strip(),
                          's "alice"')
@@ -392,13 +388,21 @@ class CommonTests:
         # certificates; it just rejects cert requests. For interactive tests, grab src/tls/ca/alice.p12 and import
         # it into the browser.
 
-        def do_test(authopts, expected, not_expected=[], session_leader=None):
+        def do_test(authopts, expected, not_expected=None, session_leader=None, retry=False):
             m.start_cockpit(tls=True)
-            output = m.execute(['curl', '-ksS', '-D-'] + authopts + ['https://localhost:9090/cockpit/login'])
-            for s in expected:
-                self.assertIn(s, output)
-            for s in not_expected:
-                self.assertNotIn(s, output)
+
+            def try_auth():
+                output = m.execute(['curl', '-ksS', '-D-', *authopts, 'https://localhost:9090/cockpit/login'])
+                for s in expected:
+                    self.assertIn(s, output)
+                for s in (not_expected or []):
+                    self.assertNotIn(s, output)
+                return True
+
+            if retry:
+                testlib.wait(try_auth, delay=5, tries=10)
+            else:
+                try_auth()
 
             # sessions/users often hang around in State=closing for a long time, ignore these
             if session_leader:
@@ -407,10 +411,13 @@ class CommonTests:
                 self.assertGreaterEqual(len(sessions), 1)
                 for session in sessions:
                     out = m.execute('loginctl session-status ' + session)
-                    if "State: active" in out:  # skip closing sessions
+                    if "State: active" in out and "Class: manager" not in out:  # skip closing and manager sessions
                         self.assertIn(session_leader, out)
                         self.assertIn('cockpit-bridge', out)
-                        self.assertIn('cockpit; type web', out)
+                        # systemd < 255: "Service: cockpit; type web; class user"
+                        # systemd ≥ 255: "Service: cockpit\n   Type: web\n Class: user"
+                        self.assertRegex(out, r"Service:\s+cockpit")
+                        self.assertRegex(out, "[tT]ype.*web")
                         break
                 else:
                     self.fail("no active session for active user")
@@ -424,14 +431,22 @@ class CommonTests:
 
         # from sssd
         self.allow_journal_messages("alice is not allowed to run sudo on x0.  This incident will be reported.")
+        # occasional intermediate error during password auth
+        self.allow_journal_messages("cockpit-session: user account access failed: 4 alice: System error")
 
         # cert auth should not be enabled by default
-        do_test(alice_cert_key, ["HTTP/1.1 401 Authentication required", '"authorize"'])
-        # password auth should work
-        do_test(alice_user_pass, ['HTTP/1.1 200 OK', '"csrf-token"'], session_leader='cockpit-session')
+        do_test(alice_cert_key, ["HTTP/1.1 401 Authentication failed", '"authorize"'])
+        # password auth should work (but might need to be retried)
+        do_test(alice_user_pass, ['HTTP/1.1 200 OK', '"csrf-token"'], session_leader='cockpit-session', retry=True)
 
         # enable cert based auth
-        m.write("/etc/cockpit/cockpit.conf", '[WebService]\nClientCertAuthentication = true\n', append=True)
+        # FIXME: this is ugly, and we don't currently accept multiple [WebService] sections
+        if self.multihost_enabled:
+            # no previous cockpit.conf
+            m.write("/etc/cockpit/cockpit.conf", '[WebService]\nClientCertAuthentication = true\n', append=True)
+        else:
+            # enable_multihost above already wrote [WebService]
+            m.write("/etc/cockpit/cockpit.conf", 'ClientCertAuthentication = true\n', append=True)
         # cert auth should work now
         do_test(alice_cert_key, ['HTTP/1.1 200 OK', '"csrf-token"'])
         # password auth, too
@@ -446,17 +461,17 @@ class CommonTests:
         self.allow_journal_messages("cockpit-session: No matching user for certificate")
         m.upload(["bob.pem", "bob.key"], "/var/tmp", relative_dir="src/tls/ca/")
         do_test(['--cert', "/var/tmp/bob.pem", '--key', "/var/tmp/bob.key"],
-                ["HTTP/1.1 401 Authentication failed", '<h1>Authentication failed</h1>'],
+                ["HTTP/1.1 401 Authentication failed"],
                 not_expected=["crsf-token"])
         self.allow_journal_messages("cockpit-session: Failed to map certificate to user: .* Invalid certificate provided")
 
         # disallow password auth
         m.write("/etc/cockpit/cockpit.conf", "[Basic]\naction = none\n", append=True)
         do_test(alice_cert_key, ['HTTP/1.1 200 OK', '"csrf-token"'])
-        do_test(alice_user_pass, ['HTTP/1.1 401 Authentication disabled', '<h1>Authentication disabled</h1>'],
+        do_test(alice_user_pass, ['HTTP/1.1 401 Authentication disabled'],
                 not_expected=["crsf-token"])
 
-        # valid user certificate which fails CA validation; this requires sssd ≥ 2.6.1
+        # valid user certificate which fails CA validation
         m.execute("mv /etc/sssd/pki/sssd_auth_ca_db.pem /etc/sssd/pki/sssd_auth_ca_db.pem.valid")
         self.allow_journal_messages("cockpit-session: Failed to map certificate to user: .* Certificate authority file not found")
         with open("src/tls/ca/alice-expired.pem") as f:
@@ -471,12 +486,12 @@ class CommonTests:
         m.execute("mv /etc/sssd/pki/sssd_auth_ca_db.pem.valid /etc/sssd/pki/sssd_auth_ca_db.pem")
 
 
-@skipOstree("No realmd available")
-@skipImage("No realmd available", "arch")
-@skipDistroPackage()
-@no_retry_when_changed
-class TestRealms(MachineCase):
-    '''Common variables and tests for all supported domain backends'''
+@testlib.skipOstree("No realmd available")
+@testlib.skipWsContainer("No sssd PAM integration in beiboot mode")
+@testlib.skipImage("No realmd available", "arch")
+@testlib.no_retry_when_changed
+class TestRealms(testlib.MachineCase):
+    """Common variables and tests for all supported domain backends"""
 
     provision = {
         "0": {"address": "10.111.113.1/20", "dns": "10.111.112.100", "memory_mb": 700},
@@ -490,14 +505,14 @@ class TestRealms(MachineCase):
         self.op_admin_password = "#realms-op-admin-password"
         self.domain_sel = "#system_information_domain_button"
         self.machine.execute("hostnamectl set-hostname x0.cockpit.lan")
+        self.enable_multihost(self.machine)
 
         # realmd times out on inactivity, which occasionally races with the proxy
         self.allow_journal_messages("couldn't get all properties of org.freedesktop.realmd.Service.*org.freedesktop.DBus.Error.NoReply: Remote peer disconnected")
 
 
-@skipImage("freeipa not currently available", "debian-*")
-@skipDistroPackage()
-@no_retry_when_changed
+@testlib.no_retry_when_changed
+@testlib.skipImage("freeipa not currently available", "debian-testing")
 class TestIPA(TestRealms, CommonTests):
     def setUp(self):
         super().setUp()
@@ -508,10 +523,9 @@ class TestIPA(TestRealms, CommonTests):
         self.machines['services'].execute("/root/run-freeipa")
         # Wait for FreeIPA to come up and DNS to work as expected
         # https://bugzilla.redhat.com/show_bug.cgi?id=1071356#c11
-        wait(lambda: self.machine.execute("nslookup -type=SRV _ldap._tcp.cockpit.lan"))
+        testlib.wait(lambda: self.machine.execute("nslookup -type=SRV _ldap._tcp.cockpit.lan"))
 
-        if "ubuntu" in self.machine.image or "debian" in self.machine.image:
-            setup_fake_chrony(self.machine)
+        maybe_setup_fake_chrony(self.machine)
 
         # wait until FreeIPA started up
         self.machines['services'].execute("""podman exec -i freeipa sh -ec '
@@ -526,12 +540,12 @@ class TestIPA(TestRealms, CommonTests):
         self.machine.execute("echo '10.111.112.100 ipa-ca.cockpit.lan' >> /etc/hosts")
 
         # HACK: Figure out why this happens
-        self.allow_journal_messages('''.*didn't receive expected "authorize" message''',
+        self.allow_journal_messages(""".*didn't receive expected "authorize" message""",
                                     'cockpit-session:$')
         self.allow_journal_messages('/bin/bash: /home/admin/.bashrc: Permission denied')
 
     def checkBackendSpecifics(self):
-        '''Check domain backend specific integration'''
+        """Check domain backend specific integration"""
 
         m = self.machine
         b = self.browser
@@ -580,17 +594,9 @@ class TestIPA(TestRealms, CommonTests):
         m.stop_cockpit()
         m.start_cockpit()
 
-        # check respecting FreeIPA's/sssd's ssh known host keys
-        b.login_and_go("/system", user=f'{self.admin_user}@cockpit.lan', password=self.admin_password)
-        b.switch_to_top()
-        b.click("#hosts-sel button")
-        b.click("button:contains('Add new host')")
-        b.wait_popup('hosts_setup_server_dialog')
-        b.set_input_text('#add-machine-address', "x0.cockpit.lan")
-        b.click('#hosts_setup_server_dialog button:contains(Add)')
-
-        b.wait_not_present('#hosts_setup_server_dialog')
-        b.wait_visible("a[href='/@x0.cockpit.lan']")
+        # check respecting FreeIPA's/sssd's ssh known host keys; login_and_go() does not expect/answer
+        # unknown host prompts
+        b.login_and_go(user=f'{self.admin_user}@cockpit.lan', password=self.admin_password)
         # starts proper session
         m.execute("until loginctl --no-legend list-sessions | grep -qi 'admin@COCKPIT.LAN.*web console'; do sleep 1; done", timeout=10)
         b.logout()
@@ -602,7 +608,7 @@ class TestIPA(TestRealms, CommonTests):
         self.allow_journal_messages("Received unexpected TLS connection and no certificate was configured")
 
     def checkBackendSpecificCleanup(self):
-        '''Check domain backend specific integration after leaving domain'''
+        """Check domain backend specific integration after leaving domain"""
 
         m = self.machine
 
@@ -612,14 +618,10 @@ class TestIPA(TestRealms, CommonTests):
         m.execute("! test -e /etc/cockpit/ws-certs.d/10-ipa.cert")
         m.execute("! test -e /etc/cockpit/ws-certs.d/10-ipa.key")
         # should have stopped cert tracking
-        wait(lambda: "status:" not in m.execute("ipa-getcert list"))
-
-    @todoPybridge()
-    def testQualifiedUsers(self):
-        super().testQualifiedUsers()
+        testlib.wait(lambda: "status:" not in m.execute("ipa-getcert list"))
 
     def testUnqualifiedUsers(self):
-        '''Extend the common test with 2FA login'''
+        """Extend the common test with 2FA login"""
 
         m = self.machine
         b = self.browser
@@ -632,7 +634,7 @@ class TestIPA(TestRealms, CommonTests):
                           r"/pam_sss/ s/use_first_pass/forward_pass/", "/etc/pam.d/common-auth")
 
         # set up "alice" user with HOTP; that won't affect existing users (admin)
-        # https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/linux_domain_identity_authentication_and_policy_guide/otp
+        # https://docs.redhat.com/documentation/en-us/red_hat_enterprise_linux/7/html/linux_domain_identity_authentication_and_policy_guide/otp
         out = self.machines['services'].execute("""podman exec -i freeipa sh -ec '
             ipa config-mod --user-auth-type=otp
             ipa user-add --first=Alice --last=Developer alice
@@ -647,7 +649,7 @@ class TestIPA(TestRealms, CommonTests):
         alice_hotp_key = base64.b64decode(alice_hotp_key)
 
         # wait until this propagates to the client
-        wait(lambda: m.execute("su -s /bin/sh -c 'su - alice </dev/null' - nobody 2>&1 | grep 'Second Factor'"))
+        testlib.wait(lambda: m.execute("su -s /bin/sh -c 'su - alice </dev/null' - nobody 2>&1 | grep 'Second Factor'"))
 
         m.start_cockpit()
 
@@ -661,7 +663,8 @@ class TestIPA(TestRealms, CommonTests):
         # wrong token (wrong number of digits)
         b.set_val("#conversation-input", "1234")
         b.click('#login-button')
-        b.wait_text("#login-error-message", "Authentication failed")
+        b.wait_text("#login-error-title", "Authentication failed")
+        b.wait_not_visible("#login-error-message")
 
         b.set_val('#login-user-input', "alice")
         b.set_val('#login-password-input', "alicessecret")
@@ -685,9 +688,9 @@ class TestIPA(TestRealms, CommonTests):
         # Join cockpit.lan
         b.click(self.domain_sel)
         b.wait_popup("realms-join-dialog")
-        b.wait_attr("#realms-op-address", "data-discover", "done")
+        self.wait_discover()
         b.set_input_text(self.op_address, "cockpit.lan")
-        b.wait_in_text("#realms-op-address-helper", "Domain is not supported")
+        self.wait_address_helper("Domain is not supported")
         # no admin name auto-detection for unsupported domains
         b.wait_val(self.op_admin, "")
         b.set_input_text(self.op_admin, self.admin_user)
@@ -698,8 +701,7 @@ class TestIPA(TestRealms, CommonTests):
         self.allow_journal_messages(".*couldn't introspect /org/freedesktop/realmd.*",
                                     "sudo: unable to resolve host x0.cockpit.lan: Name or service not known")
 
-    @timeout(900)
-    @todoPybridge()
+    @testlib.timeout(900)
     def testClientCertAuthentication(self):
         m = self.machine
         b = self.browser
@@ -738,7 +740,7 @@ ipa-advise enable-admins-sudo | sh -ex
 
         # enable ssh GSSAPI authentication
         m.execute("sed -ri 's/#GSSAPIAuthentication.*/GSSAPIAuthentication yes/' /etc/ssh/sshd_config")
-        m.execute("systemctl restart sshd")
+        m.execute(self.restart_sshd)
 
         # avoid "unknown host" error in SSH
         m.execute("su -c 'mkdir -p ~/.ssh; ssh-keyscan localhost > ~/.ssh/known_hosts' alice")
@@ -750,10 +752,10 @@ ipa-advise enable-admins-sudo | sh -ex
         # this is specific to IPA, as with AD cockpit-ws does not get a keytab
 
         # as we can't do cert auth in the browser, splice socat in between to do that for us
-        m.execute(f'''! selinuxenabled || semanage port -m -t websm_port_t -p tcp 443
+        m.execute(f"""! selinuxenabled || semanage port -m -t websm_port_t -p tcp 443
                       mkdir -p /run/systemd/system/cockpit.socket.d/
                       printf "[Socket]\nListenStream=\nListenStream=443" > /run/systemd/system/cockpit.socket.d/listen.conf
-                      sed -i '/\\[WebService/ aOrigins = http://{m.web_address}:{m.web_port}' /etc/cockpit/cockpit.conf''')
+                      sed -i '/\\[WebService/ aOrigins = http://{m.web_address}:{m.web_port}' /etc/cockpit/cockpit.conf""")
         m.spawn("socat TCP-LISTEN:9090,reuseaddr,fork OPENSSL:x0.cockpit.lan:443,cert=/var/tmp/alice.pem,key=/var/tmp/alice.key", "socat-certauth.log")
         m.start_cockpit(tls=True)
 
@@ -761,7 +763,7 @@ ipa-advise enable-admins-sudo | sh -ex
         b.open("/system/terminal")
         b.enter_page("/system/terminal")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "alice")
-        b.key_press("klist\r")
+        b.input_text("klist\n")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "Ticket cache: FILE:/run/user")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "Default principal: alice@COCKPIT.LAN")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "for client HTTP/x0.cockpit.lan@COCKPIT.LAN")
@@ -783,9 +785,9 @@ ipa-advise enable-admins-sudo | sh -ex
         self.assertIn("Permission denied", m.execute(f"su -c '! {ccache_env} ssh x0.cockpit.lan 2>&1' alice"))
         b.switch_to_top()
         b.open_superuser_dialog()
-        b.wait_in_text(".pf-c-modal-box:contains('Switch to administrative access')", "Password for alice:")
-        b.click(".pf-c-modal-box:contains('Switch to administrative access') .btn-cancel")
-        b.wait_not_present(".pf-c-modal-box:contains('Switch to administrative access')")
+        b.wait_in_text(".pf-v5-c-modal-box:contains('Switch to administrative access')", "Password for alice:")
+        b.click(".pf-v5-c-modal-box:contains('Switch to administrative access') .btn-cancel")
+        b.wait_not_present(".pf-v5-c-modal-box:contains('Switch to administrative access')")
 
         # set up delegation rule
         script = """
@@ -804,32 +806,27 @@ ipa-advise enable-admins-sudo | sh -ex
         b.enter_page("/system")
         b.wait_visible("#reboot-button")
 
-        # ssh works with the delegated ticket
+        # CLI ssh works with the delegated ticket
         out = m.execute(f"su -c '{ccache_env} ssh -vv -K x0.cockpit.lan echo hello' alice")
         self.assertEqual(out.strip(), "hello")
 
-        # cockpit-ssh works with the delegated ticket
+        # cockpit session through ssh works with the delegated ticket
         b.switch_to_top()
-        b.click("#hosts-sel button")
-        b.click(".nav-hosts-actions button")
-        b.set_input_text("#add-machine-address", "x0.cockpit.lan")
-        b.click("#hosts_setup_server_dialog .pf-m-primary")
-        b.click(".view-hosts a[href='/@x0.cockpit.lan']")
-        b.wait_js_cond("window.location.pathname == '/@x0.cockpit.lan/system'")
-        # no root privs in that session (see below)
-        b.enter_page("/system", "x0.cockpit.lan")
-        b.wait_visible(".pf-c-alert:contains('Web console is running in limited access mode.')")
-        b.wait_not_present("#reboot-button")
+        b.go("/@x0.cockpit.lan/system")
+        # only ack the addition of host, no authentication/password
+        b.click("#machine-troubleshoot")
+        b.wait_visible('#hosts_setup_server_dialog')
+        b.click('#hosts_setup_server_dialog button:contains(Add)')
+        b.wait_not_present('#hosts_setup_server_dialog')
+        b.wait_visible('#hosts_connect_server_dialog')
+        b.click('#hosts_connect_server_dialog button.pf-m-warning')
 
-        # Getting root privs through sudo in the remote SSH session does not currently work.
+        # Getting root privs through sudo with kerberos in the remote SSH session does not currently work.
         # ssh -K is supposed to forward the credentials cache, but doesn't; klist in the ssh session is empty
-        # and there is no ccache; so, emulate what cockpit-ssh could eventually do and check that *if* the
-        # session had the ticket forwarded, it *could* do sudo. See https://issues.redhat.com/browse/COCKPIT-643
-        b.open("/@x0.cockpit.lan/system/terminal")
-        b.enter_page("/system/terminal", host="x0.cockpit.lan")
-        b.wait_in_text(".terminal .xterm-accessibility-tree", "alice")
-        b.key_press(f"{ccache_env} sudo whoami\r")
-        b.wait_in_text(".terminal .xterm-accessibility-tree", "root")
+        # and there is no ccache.
+        b.enter_page("/system", "x0.cockpit.lan")
+        b.wait_visible(".pf-v5-c-alert:contains('Web console is running in limited access mode.')")
+        b.wait_not_present("#reboot-button")
 
         # S4U proxy ticket gets cleaned up on logout
         b.logout()
@@ -837,9 +834,8 @@ ipa-advise enable-admins-sudo | sh -ex
         m.execute(f"! su -c '{ccache_env} klist' alice")
 
 
-@skipImage("adcli not on test images", "debian-*", "ubuntu-*")
-@skipDistroPackage()
-@no_retry_when_changed
+@testlib.skipImage("adcli not on test images", "debian-*", "ubuntu-*")
+@testlib.no_retry_when_changed
 class TestAD(TestRealms, CommonTests):
     def setUp(self):
         super().setUp()
@@ -847,43 +843,34 @@ class TestAD(TestRealms, CommonTests):
         self.admin_password = "foobarFoo123"
         self.alice_password = 'WonderLand123'
         self.expected_server_software = "active-directory"
-        # necessary to run ldapmodify; FIXME: change this on the services image itself
-        self.machines['services'].execute("sed -i 's/-e/-e INSECURELDAP=true &/' /root/run-samba-domain")
         self.machines['services'].execute("/root/run-samba-domain")
 
         m = self.machine
 
         # Wait for AD to come up and DNS to work as expected
-        wait(lambda: m.execute("nslookup -type=SRV _ldap._tcp.cockpit.lan"))
+        testlib.wait(lambda: m.execute("nslookup -type=SRV _ldap._tcp.cockpit.lan"))
         # DNS is not sufficient yet, needs to start LDAP server as well
         m.execute("until nc -z f0.cockpit.lan 389; do sleep 1; done")
         # also wait for Kerberos
-        m.execute(f"set -e; until echo {self.admin_password} | kinit {self.admin_user}@COCKPIT.LAN; do sleep 1; done; kdestroy")
+        m.execute(f"until echo {self.admin_password} | kinit {self.admin_user}@COCKPIT.LAN; do sleep 1; done; kdestroy")
 
         # allow sudo access to domain admins; FIXME: Is there a server-side setting for this,
         # similar to "ipa-advise enable-admins-sudo"?
         m.write("/etc/sudoers.d/domain-admins", r"%domain\ admins@COCKPIT.LAN ALL=(ALL) ALL")
 
-        # HACK: work around https://bugzilla.redhat.com/show_bug.cgi?id=1839805
-        m.write("/etc/sssd/conf.d/rhbz1839805.conf", "[domain/cockpit.lan]\nad_gpo_access_control=disabled\n", perm="0600")
-
         # HACK: Figure out why this happens
-        self.allow_journal_messages('''.*didn't receive expected "authorize" message''',
+        self.allow_journal_messages(""".*didn't receive expected "authorize" message""",
                                     'cockpit-session:$')
         self.allow_journal_messages('/bin/bash: /home/admin/.bashrc: Permission denied')
 
     def checkBackendSpecifics(self):
-        '''Check domain backend specific integration'''
-
-        pass
+        """Check domain backend specific integration"""
 
     def checkBackendSpecificCleanup(self):
-        '''Check domain backend specific integration after leaving domain'''
-
-        pass
+        """Check domain backend specific integration after leaving domain"""
 
     def testUnqualifiedUsers(self):
-        '''Extend the test to check a new AD user'''
+        """Extend the test to check a new AD user"""
 
         super().testUnqualifiedUsers()
 
@@ -894,7 +881,7 @@ class TestAD(TestRealms, CommonTests):
         # create another AD user
         self.machines['services'].execute(f"podman exec -i samba samba-tool user add alice {self.alice_password}")
         # ensure it works
-        m.execute('id alice')
+        m.execute('while ! id alice; do sleep 5; done', timeout=300)
         b.login_and_go('/system', user='alice', password=self.alice_password)
         b.wait_visible("#overview")
         b.logout()
@@ -910,15 +897,19 @@ class TestAD(TestRealms, CommonTests):
             alice_cert = f.read().strip()
         # mangle into form palatable for LDAP
         alice_cert = ''.join([line for line in alice_cert.splitlines() if not line.startswith("----")])
-        # set up an AD user and import their TLS certificate; avoid using the common "userCertificate;binary",
-        # as that does not work with Samba
-        services_machine.execute(r"""podman exec -i samba sh -exc '
-samba-tool user add alice %(alice_pass)s
-printf "version: 1\ndn: cn=alice,cn=users,dc=cockpit,dc=lan\nchangetype: modify\nadd: userCertificate\nuserCertificate: %(alice_cert)s\n" | \
-        ldapmodify -v -U Administrator -w '%(admin_pass)s'
+        # set up an AD user and import their TLS certificate
+        services_machine.write("/tmp/alice_edit", f'''#!/bin/sh -eu
+sed -i "/^$/d" "$1"
+echo "userCertificate: {alice_cert}" >> "$1"
+''', perm="755")
+        services_machine.execute(f"""
+podman cp /tmp/alice_edit samba:/tmp/
+podman exec -i samba sh -exc '
+samba-tool user add alice {self.alice_password}
+samba-tool user edit --editor=/tmp/alice_edit alice
 # for debugging:
-ldapsearch -v -U Administrator -w '%(admin_pass)s' -b 'cn=alice,cn=users,dc=cockpit,dc=lan'
-' """ % {"alice_pass": self.alice_password, "admin_pass": self.admin_password, "alice_cert": alice_cert})
+samba-tool user show alice
+' """, stdout=None)
 
         # set up sssd for certificate mapping to AD
         # see sssd.conf(5) "CERTIFICATE MAPPING SECTION" and sss-certmap(5)
@@ -996,12 +987,12 @@ sed -i '/^sudoers:/ s/files sss/sss files/' /etc/nsswitch.conf
 # This is here because our test framework can't run ipa VM's twice
 
 
-@skipOstree("No realmd available")
-@skipImage("No realmd available", "arch")
-@skipImage("freeipa not currently available", "debian-*")
-@skipDistroPackage()
-@no_retry_when_changed
-class TestKerberos(MachineCase):
+@testlib.skipOstree("No realmd available")
+@testlib.skipWsContainer("No sssd PAM integration in beiboot mode")
+@testlib.skipImage("No realmd available", "arch")
+@testlib.skipImage("freeipa not currently available", "debian-*")
+@testlib.no_retry_when_changed
+class TestKerberos(testlib.MachineCase):
     provision = {
         "0": {"address": "10.111.113.1/20", "dns": "10.111.112.100", "memory_mb": 512},
         "services": {"image": "services", "memory_mb": 1500}
@@ -1009,8 +1000,8 @@ class TestKerberos(MachineCase):
 
     def setUp(self):
         super().setUp()
-        if "ubuntu" in self.machine.image or "debian" in self.machine.image:
-            setup_fake_chrony(self.machine)
+        maybe_setup_fake_chrony(self.machine)
+        self.enable_multihost(self.machine)
 
     def configure_kerberos(self, keytab):
         self.machines["services"].execute("/root/run-freeipa")
@@ -1024,8 +1015,6 @@ class TestKerberos(MachineCase):
         self.machine.execute(JOIN_SCRIPT % args, timeout=1800)
         self.machine.execute(WAIT_KRB_SCRIPT.format("admin"), timeout=300)
 
-    @skipBrowser("Firefox cannot work with cookies", "firefox")
-    @todoPybridge()
     def testNegotiate(self):
         self.allow_hostkey_messages()
         b = self.browser
@@ -1065,7 +1054,7 @@ class TestKerberos(MachineCase):
         self.assertIn("HTTP/1.1 200 OK", output)
         self.assertIn('"csrf-token"', output)
 
-        cookie = re.search("Set-Cookie: cockpit=([^ ;]+)", output).group(1)
+        cookie = re.search(r"Set-Cookie: cockpit=([^ ;]+)", output).group(1)
         b.open("/system/terminal", cookie={"name": "cockpit", "value": cookie, "domain": m.web_address, "path": "/"})
         b.wait_visible('#content')
 
@@ -1076,7 +1065,7 @@ class TestKerberos(MachineCase):
         b.enter_page("/system/terminal")
         # wait for prompt
         b.wait_in_text(".terminal .xterm-accessibility-tree", "admin")
-        b.key_press("klist\r")
+        b.input_text("klist\n")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "Ticket cache")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "Default principal: admin@COCKPIT.LAN")
         b.wait_in_text(".terminal .xterm-accessibility-tree", "krbtgt/COCKPIT.LAN")
@@ -1090,6 +1079,8 @@ class TestKerberos(MachineCase):
         b.wait_visible('#hosts_setup_server_dialog')
         b.click('#hosts_setup_server_dialog button:contains(Add)')
         b.wait_not_present('#hosts_setup_server_dialog')
+        b.wait_visible('#hosts_connect_server_dialog')
+        b.click('#hosts_connect_server_dialog button.pf-m-warning')
 
         b.enter_page("/system/terminal", host="x0.cockpit.lan")
         b.wait_visible(".terminal")
@@ -1125,9 +1116,8 @@ class TestKerberos(MachineCase):
         self.allow_journal_messages(".*Request ticket server HTTP/x0.cockpit.lan@COCKPIT.LAN not found in keytab.*")
 
 
-@skipImage("No realmd available", "arch")
-@skipOstree("Package (un)install does not work on OSTree")
-@skipDistroPackage()
+@testlib.skipImage("No realmd available", "arch")
+@testlib.skipOstree("Package (un)install does not work on OSTree")
 class TestPackageInstall(packagelib.PackageCase):
 
     def setUp(self):
@@ -1144,10 +1134,10 @@ class TestPackageInstall(packagelib.PackageCase):
             def check():
                 try:
                     b.mouse("#system_information_domain_tooltip", "mouseenter")
-                    b.wait_in_text("div.pf-c-tooltip", text)
+                    b.wait_in_text("div.pf-v5-c-tooltip", text)
                     b.mouse("#system_information_domain_tooltip", "mouseleave")
                     return True
-                except (RuntimeError, Error):
+                except (RuntimeError, testlib.Error):
                     return False
             b.wait(check)
 
@@ -1155,10 +1145,11 @@ class TestPackageInstall(packagelib.PackageCase):
         m = self.machine
         b = self.browser
 
-        m.execute("dpkg --purge realmd 2>/dev/null || rpm --erase realmd || yum remove -y realmd")
+        m.execute("dpkg --purge realmd 2>/dev/null || rpm --erase realmd || dnf remove -y realmd")
 
         # case 1: disable PackageKit
         m.execute("systemctl mask packagekit; systemctl stop packagekit.service || true")
+        self.allow_browser_errors('checkRealm failed.*"problem":"not-found"')
         self.login_and_go("/system")
         b.wait_text(self.domain_sel, "Join domain")
         b.wait_visible(self.domain_sel + "[disabled]")
@@ -1169,15 +1160,15 @@ class TestPackageInstall(packagelib.PackageCase):
         m.execute("systemctl unmask packagekit")
         self.login_and_go("/system")
         # Joining a domain should bring up the install dialog
-        b.wait_text(self.domain_sel, "Join domain")
+        b.wait_text(self.domain_sel, "Install realmd support")
         self.waitTooltip("requires installation of realmd")
 
         b.click(self.domain_sel)
         with b.wait_timeout(30):
-            b.wait_in_text(".pf-c-modal-box:contains('Install software')", "realmd is not available")
-        b.wait_visible(".pf-c-modal-box:contains('Install software') .pf-c-modal-box__footer button:contains(Install):disabled")
-        b.click(".pf-c-modal-box:contains('Install software') .pf-c-modal-box__footer button.cancel")
-        b.wait_not_present(".pf-c-modal-box:contains('Install software')")
+            b.wait_in_text(".pf-v5-c-modal-box:contains('Install software')", "realmd is not available")
+        b.wait_visible(".pf-v5-c-modal-box:contains('Install software') .pf-v5-c-modal-box__footer button:contains(Install):disabled")
+        b.click(".pf-v5-c-modal-box:contains('Install software') .pf-v5-c-modal-box__footer button.cancel")
+        b.wait_not_present(".pf-v5-c-modal-box:contains('Install software')")
         b.logout()
 
         # case 3: provide an available realmd package
@@ -1188,18 +1179,18 @@ class TestPackageInstall(packagelib.PackageCase):
         self.login_and_go("/system")
 
         # Joining a domain should bring up the install dialog
-        b.wait_text(self.domain_sel, "Join domain")
+        b.wait_text(self.domain_sel, "Install realmd support")
         self.waitTooltip("requires installation of realmd")
 
         b.click(self.domain_sel)
-        b.click(".pf-c-modal-box:contains('Install software') .pf-c-modal-box__footer button:contains(Install)")
-        b.wait_not_present(".pf-c-modal-box:contains('Install software')")
+        b.click(".pf-v5-c-modal-box:contains('Install software') .pf-v5-c-modal-box__footer button:contains(Install)")
+        b.wait_not_present(".pf-v5-c-modal-box:contains('Install software')")
 
         # the stub package doesn't provide a realmd D-Bus service, so the "join
         # domain" dialog won't ever appear; just check that it was installed
         m.execute("test -e /realmd-stub")
 
-    @nondestructive
+    @testlib.nondestructive
     def testDialogTransition(self):
         m = self.machine
         b = self.browser
@@ -1211,20 +1202,21 @@ class TestPackageInstall(packagelib.PackageCase):
         self.login_and_go("/system")
 
         # Joining a domain should bring up the install dialog
-        b.wait_text(self.domain_sel, "Join domain")
+        b.wait_text(self.domain_sel, "Install realmd support")
         self.waitTooltip("requires installation of realmd")
 
         b.click(self.domain_sel)
         # restore realmd service, to pretend that package install completed
         m.execute("systemctl unmask realmd")
-        b.click(".pf-c-modal-box .pf-c-modal-box__footer button:contains('Install')")
-        b.wait_not_present(".pf-c-modal-box:contains('Install software')")
+        b.click(".pf-v5-c-modal-box .pf-v5-c-modal-box__footer button:contains('Install')")
+        b.wait_not_present(".pf-v5-c-modal-box:contains('Install software')")
 
         # should continue straight to join dialog
         b.wait_visible("#realms-join-dialog")
 
         # no auto-detected domain/admin
-        b.wait_attr("#realms-op-address", "data-discover", "done")
+        with b.wait_timeout(60):
+            b.wait_attr("#realms-op-address", "data-discover", "done")
         self.assertEqual(b.val("#realms-op-address"), "")
         self.assertEqual(b.val("#realms-op-admin"), "")
 
@@ -1237,4 +1229,4 @@ class TestPackageInstall(packagelib.PackageCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

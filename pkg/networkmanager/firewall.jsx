@@ -14,21 +14,21 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import 'cockpit-dark-theme'; // once per page
 import cockpit from "cockpit";
-import React, { useState } from 'react';
+import React from 'react';
 import { createRoot } from "react-dom/client";
 import { Alert } from "@patternfly/react-core/dist/esm/components/Alert/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Breadcrumb, BreadcrumbItem } from "@patternfly/react-core/dist/esm/components/Breadcrumb/index.js";
 import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { DataList, DataListCell, DataListCheck, DataListItem, DataListItemCells, DataListItemRow } from "@patternfly/react-core/dist/esm/components/DataList/index.js";
-import { Dropdown, DropdownItem, KebabToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { DropdownItem } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Form, FormGroup, FormHelperText } from "@patternfly/react-core/dist/esm/components/Form/index.js";
 import { Radio } from "@patternfly/react-core/dist/esm/components/Radio/index.js";
@@ -36,11 +36,12 @@ import { Stack } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 import { Title } from "@patternfly/react-core/dist/esm/components/Title/index.js";
 import { Toolbar, ToolbarContent, ToolbarItem } from "@patternfly/react-core/dist/esm/components/Toolbar/index.js";
-import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Page, PageBreadcrumb, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Modal } from "@patternfly/react-core/dist/esm/components/Modal/index.js";
 import { ExclamationCircleIcon } from '@patternfly/react-icons';
 
 import firewall from "./firewall-client.js";
+import { FormHelper } from "cockpit-components-form-helper";
 import { ListingTable } from 'cockpit-components-table.jsx';
 import { ModalError } from "cockpit-components-inline-notification.jsx";
 import { EmptyStatePanel } from "cockpit-components-empty-state.jsx";
@@ -48,6 +49,8 @@ import { FirewallSwitch } from "./firewall-switch.jsx";
 
 import { superuser } from "superuser";
 import { WithDialogs, DialogsContext } from "dialogs.jsx";
+
+import { KebabDropdown } from "cockpit-components-dropdown";
 
 import "./networking.scss";
 
@@ -57,9 +60,7 @@ superuser.reload_page_on_change();
 
 const upperCaseFirstLetter = text => text[0].toUpperCase() + text.slice(1);
 
-const DeleteDropdown = ({ items, id }) => {
-    const [isActionsKebabOpen, setActionsKebabOpen] = useState(false);
-
+const DeleteDropdown = ({ items }) => {
     const dropdown_items = items.map(item => <DropdownItem key={item.text}
                                                            className={item.danger ? "pf-m-danger" : ""}
                                                            aria-label={item.ariaLabel}
@@ -67,11 +68,7 @@ const DeleteDropdown = ({ items, id }) => {
         {item.text}
     </DropdownItem>);
 
-    return (<Dropdown toggle={<KebabToggle onToggle={isOpen => setActionsKebabOpen(isOpen)} id={id || null} />}
-                      isOpen={isActionsKebabOpen}
-                      isPlain
-                      position="right"
-                      dropdownItems={dropdown_items} />);
+    return <KebabDropdown dropdownItems={dropdown_items} />;
 };
 
 function serviceRow(props) {
@@ -120,7 +117,7 @@ function serviceRow(props) {
         items.push({ text: _("Delete"), danger: true, ariaLabel: cockpit.format(_("Remove service $0"), props.service.id), handleClick: onRemoveService });
 
         columns.push({
-            title: <DeleteDropdown items={items} id={props.service.key} />
+            title: <DeleteDropdown items={items} />
         });
     }
 
@@ -185,26 +182,25 @@ function ZoneSection(props) {
         </Button>
     );
 
+    const actions = !firewall.readonly && <div className="zone-section-buttons">{addServiceAction}{deleteButton}</div>;
+
     return <Card className="zone-section" data-id={props.zone.id}>
-        <CardHeader className="zone-section-heading">
-            <CardTitle>
-                <Flex alignItems={{ default: 'alignSelfBaseline' }} spaceItems={{ default: 'spaceItemsXl' }}>
-                    <Title headingLevel="h2" size="xl">
-                        { cockpit.format(_("$0 zone"), upperCaseFirstLetter(props.zone.name || props.zone.id)) }
-                    </Title>
-                    <Flex>
-                        { props.zone.interfaces.length > 0 &&
-                        <span>
-                            <strong>{cockpit.ngettext("Interface", "Interfaces", props.zone.interfaces.length)}</strong> {props.zone.interfaces.join(", ")}
-                        </span>
-                        }
-                        <span>
-                            <strong>{_("Allowed addresses")}</strong> {props.zone.source.length ? props.zone.source.join(", ") : _("Entire subnet")}
-                        </span>
-                    </Flex>
+        <CardHeader actions={{ actions }} className="zone-section-heading">
+            <Flex alignItems={{ default: 'alignSelfBaseline' }} spaceItems={{ default: 'spaceItemsXl' }}>
+                <CardTitle component="h2">
+                    { cockpit.format(_("$0 zone"), upperCaseFirstLetter(props.zone.name || props.zone.id)) }
+                </CardTitle>
+                <Flex>
+                    { props.zone.interfaces.length > 0 &&
+                    <span>
+                        <strong>{cockpit.ngettext("Interface", "Interfaces", props.zone.interfaces.length)}</strong> {props.zone.interfaces.join(", ")}
+                    </span>
+                    }
+                    <span>
+                        <strong>{_("Allowed addresses")}</strong> {props.zone.source.length ? props.zone.source.join(", ") : _("Entire subnet")}
+                    </span>
                 </Flex>
-            </CardTitle>
-            { !firewall.readonly && <CardActions className="zone-section-buttons">{addServiceAction}{deleteButton}</CardActions> }
+            </Flex>
         </CardHeader>
         {(props.zone.services.length > 0 || props.zone.ports.length > 0) &&
         <CardBody className="contains-list">
@@ -262,7 +258,7 @@ class SearchInput extends React.Component {
 
     render() {
         return (
-            <Toolbar>
+            <Toolbar className="filter-services-toolbar">
                 <ToolbarContent>
                     <ToolbarItem variant="label">
                         {_("Filter services")}
@@ -270,7 +266,7 @@ class SearchInput extends React.Component {
                     <ToolbarItem>
                         <TextInput type="search"
                                    id={this.props.id}
-                                   onChange={this.onValueChanged}
+                                   onChange={(_event, value) => this.onValueChanged(value)}
                                    value={this.state.value}
                         />
                     </ToolbarItem>
@@ -350,8 +346,11 @@ class AddEditServicesModal extends React.Component {
     }
 
     getCustomId() {
-        const all_ports = this.state.custom_tcp_ports.concat(this.state.custom_udp_ports);
-        return "custom--" + all_ports.map(this.getName).join('-');
+        return "custom--" + (
+            this.state.custom_tcp_ports.map(port => this.getName(port, "tcp"))
+                    .concat(this.state.custom_udp_ports.map(port => this.getName(port, "udp")))
+                    .join('-')
+        );
     }
 
     checkNullValues() {
@@ -463,9 +462,9 @@ class AddEditServicesModal extends React.Component {
         });
     }
 
-    getName(port) {
+    getName(port, type) {
         const known = this.state.avail_services[port];
-        if (known)
+        if (known && known.type.includes(type))
             return known.name;
         else
             return port;
@@ -480,14 +479,12 @@ class AddEditServicesModal extends React.Component {
                 return [0, _("Invalid port number")];
             else
                 return [port, ""];
-        } else if (avail.type.indexOf(type) < 0)
-            return [0, _("Port number and type do not match")];
-        else {
+        } else {
             return [avail.port, ""];
         }
     }
 
-    validate(value, event) {
+    validate(event, value) {
         let error = "";
         let targets = ['tcp', 'custom_tcp_ports', 'tcp_error', 'custom_tcp_value'];
         if (event.target.id === "udp-ports")
@@ -530,13 +527,18 @@ class AddEditServicesModal extends React.Component {
                 [targets[3]]: value
             };
 
-            let all_ports = new_ports.concat(oldState.custom_udp_ports);
-            if (event_id === "udp-ports")
-                all_ports = oldState.custom_tcp_ports.concat(new_ports);
+            let all_ports;
+            if (event_id === "udp-ports") {
+                const old_ports = oldState.custom_tcp_ports.map(port => this.getName(port, "tcp"));
+                all_ports = old_ports.concat(new_ports.map(port => this.getName(port, "udp")));
+            } else {
+                const old_ports = oldState.custom_udp_ports.map(port => this.getName(port, "udp"));
+                all_ports = new_ports.map(port => this.getName(port, "tcp")).concat(old_ports);
+            }
 
             if (oldState.generate_custom_id) {
                 if (all_ports.length > 0)
-                    newState.custom_id = "custom--" + all_ports.map(this.getName).join('-');
+                    newState.custom_id = "custom--" + all_ports.join('-');
                 else
                     newState.custom_id = "";
             }
@@ -545,7 +547,7 @@ class AddEditServicesModal extends React.Component {
         });
     }
 
-    onToggleType(value, event) {
+    onToggleType(event) {
         this.setState({
             custom: event.target.value === "ports"
         });
@@ -647,7 +649,7 @@ class AddEditServicesModal extends React.Component {
                                                     <DataListItemRow>
                                                         <DataListCheck aria-labelledby={s.id}
                                                                    isChecked={this.state.selected.has(s.id)}
-                                                                   onChange={(value, event) => this.onToggleService(event, s.id)}
+                                                                   onChange={(event, value) => this.onToggleService(event, s.id)}
                                                                    id={"firewall-service-" + s.id}
                                                                    name={s.id + "-checkbox"} />
                                                         <DataListItemCells
@@ -673,35 +675,32 @@ class AddEditServicesModal extends React.Component {
                     }
                     { !this.state.custom ||
                         <>
-                            <FormGroup label="TCP"
-                                       validated={this.state.tcp_error ? "error" : "default"}
-                                       helperText={_("Comma-separated ports, ranges, and services are accepted")}
-                                       helperTextInvalid={this.state.tcp_error}>
+                            <FormGroup label="TCP">
                                 <TextInput id="tcp-ports" type="text" onChange={this.validate}
                                            validated={this.state.tcp_error ? "error" : "default"}
                                            isDisabled={this.state.avail_services == null}
                                            value={this.state.custom_tcp_value}
                                            placeholder={_("Example: 22,ssh,8080,5900-5910")} />
+                                <FormHelper helperTextInvalid={this.state.tcp_error} helperText={_("Comma-separated ports, ranges, and services are accepted")} />
                             </FormGroup>
 
-                            <FormGroup label="UDP"
-                                       validated={this.state.udp_error ? "error" : "default"}
-                                       helperText={_("Comma-separated ports, ranges, and services are accepted")}
-                                       helperTextInvalid={this.state.udp_error}>
+                            <FormGroup label="UDP">
                                 <TextInput id="udp-ports" type="text" onChange={this.validate}
                                            validated={this.state.udp_error ? "error" : "default"}
                                            isDisabled={this.state.avail_services == null}
                                            value={this.state.custom_udp_value}
                                            placeholder={_("Example: 88,2019,nfs,rsync")} />
+                                <FormHelper helperTextInvalid={this.state.udp_error} helperText={_("Comma-separated ports, ranges, and services are accepted")} />
                             </FormGroup>
 
-                            <FormGroup label={_("ID")} helperText={_("If left empty, ID will be generated based on associated port services and port numbers")}>
-                                <TextInput id="service-name" onChange={this.setId} isDisabled={!!this.props.custom_id || this.state.avail_services == null}
+                            <FormGroup label={_("ID")}>
+                                <TextInput id="service-name" onChange={(_event, value) => this.setId(value)} isDisabled={!!this.props.custom_id || this.state.avail_services == null}
                                            value={this.state.custom_id} />
+                                <FormHelper helperText={_("If left empty, ID will be generated based on associated port services and port numbers")} />
                             </FormGroup>
 
                             <FormGroup label={_("Description")}>
-                                <TextInput id="service-description" onChange={this.setDescription} isDisabled={this.state.avail_services == null}
+                                <TextInput id="service-description" onChange={(_event, value) => this.setDescription(value)} isDisabled={this.state.avail_services == null}
                                            value={this.state.custom_description} />
                             </FormGroup>
                         </>
@@ -792,14 +791,14 @@ class ActivateZoneModal extends React.Component {
         const interfaces = firewall.availableInterfaces.filter(i => {
             let inZone = false;
             firewall.activeZones.forEach(z => {
-                inZone |= firewall.zones[z].interfaces.indexOf(i.device) !== -1;
+                inZone ||= firewall.zones[z].interfaces.indexOf(i.device) !== -1;
             });
             return !inZone;
         });
         // https://networkmanager.dev/docs/api/latest/nm-dbus-types.html#NMDeviceCapabilities
         const NM_DEVICE_CAP_IS_SOFTWARE = 4;
-        const virtualDevices = interfaces.filter(i => i.capabilities & NM_DEVICE_CAP_IS_SOFTWARE !== 0 && i.device !== "lo").sort((a, b) => a.device.localeCompare(b.device));
-        const physicalDevices = interfaces.filter(i => (i.capabilities & NM_DEVICE_CAP_IS_SOFTWARE === 0) && i.device !== "lo").sort((a, b) => a.device.localeCompare(b.device));
+        const virtualDevices = interfaces.filter(i => (i.capabilities & NM_DEVICE_CAP_IS_SOFTWARE) !== 0 && i.device !== "lo").sort((a, b) => a.device.localeCompare(b.device));
+        const physicalDevices = interfaces.filter(i => ((i.capabilities & NM_DEVICE_CAP_IS_SOFTWARE) === 0) && i.device !== "lo").sort((a, b) => a.device.localeCompare(b.device));
         return (
             <Modal id="add-zone-dialog" isOpen
                    position="top" variant="medium"
@@ -828,7 +827,7 @@ class ActivateZoneModal extends React.Component {
                                         .map(z =>
                                             <Radio key={z} id={z} name="zone" value={z}
                                                    isChecked={this.state.zone == z}
-                                                   onChange={(value, e) => this.onChange("zone", e.target.value)}
+                                                   onChange={e => this.onChange("zone", e.target.value)}
                                                    label={ firewall.zones[z].id } />
                                         )}
                             </FlexItem>
@@ -837,7 +836,7 @@ class ActivateZoneModal extends React.Component {
                                 { customZones.map(z =>
                                     <Radio key={z} id={z} name="zone" value={z}
                                            isChecked={this.state.zone == z}
-                                           onChange={(value, e) => this.onChange("zone", e.target.value)}
+                                           onChange={e => this.onChange("zone", e.target.value)}
                                            label={ firewall.zones[z].id } />
                                 )}
                             </FlexItem>
@@ -854,7 +853,7 @@ class ActivateZoneModal extends React.Component {
                         <div id="add-zone-services-readonly">
                             { (this.state.zone && firewall.zones[this.state.zone].services.join(", ")) || _("None") }
                         </div>
-                        <FormHelperText isHidden={false}>{_("The cockpit service is automatically included")}</FormHelperText>
+                        <FormHelper helperText={_("The cockpit service is automatically included")} />
                     </FormGroup>
 
                     <FormGroup label={ _("Interfaces") } hasNoPaddingTop isInline>
@@ -862,14 +861,14 @@ class ActivateZoneModal extends React.Component {
                             <Checkbox key={i.device}
                                       id={i.device}
                                       value={i.device}
-                                      onChange={(value, event) => this.onInterfaceChange(event)}
+                                      onChange={(event, value) => this.onInterfaceChange(event)}
                                       isChecked={this.state.interfaces.has(i.device)}
                                       label={i.device} />) }
                         { virtualDevices.map(i =>
                             <Checkbox key={i.device}
                                       id={i.device}
                                       value={i.device}
-                                      onChange={(value, event) => this.onInterfaceChange(event)}
+                                      onChange={(event, value) => this.onInterfaceChange(event)}
                                       isChecked={this.state.interfaces.has(i.device)}
                                       label={i.device} />) }
                     </FormGroup>
@@ -879,16 +878,20 @@ class ActivateZoneModal extends React.Component {
                                isChecked={this.state.ipRange == "ip-entire-subnet"}
                                value="ip-entire-subnet"
                                id="ip-entire-subnet"
-                               onChange={(value, e) => this.onChange("ipRange", e.target.value)}
+                               onChange={e => this.onChange("ipRange", e.target.value)}
                                label={ _("Entire subnet") } />
                         <Radio name="add-zone-ip"
                                isChecked={this.state.ipRange == "ip-range"}
                                value="ip-range"
                                id="ip-range"
-                               onChange={(value, e) => this.onChange("ipRange", e.target.value)}
+                               onChange={e => this.onChange("ipRange", e.target.value)}
                                label={ _("Range") } />
-                        { this.state.ipRange === "ip-range" && <TextInput id="add-zone-ip" onChange={value => this.onChange("ipRangeValue", value)} /> }
-                        <FormHelperText isHidden={this.state.ipRange != "ip-range"}>{_("IP address with routing prefix. Separate multiple values with a comma. Example: 192.0.2.0/24, 2001:db8::/32")}</FormHelperText>
+                        {this.state.ipRange === "ip-range" && (
+                            <>
+                                <TextInput id="add-zone-ip" onChange={(_event, value) => this.onChange("ipRangeValue", value)} />
+                                <FormHelperText>{_("IP address with routing prefix. Separate multiple values with a comma. Example: 192.0.2.0/24, 2001:db8::/32")}</FormHelperText>
+                            </>
+                        )}
                     </FormGroup>
                 </Form>
             </Modal>
@@ -1044,26 +1047,25 @@ export class Firewall extends React.Component {
         const enabled = this.state.firewall.enabled;
 
         return (
-            <Page groupProps={{ sticky: 'top' }}
-                  isBreadcrumbGrouped
-                  breadcrumb={
-                      <Breadcrumb>
-                          <BreadcrumbItem onClick={go_up} className="pf-c-breadcrumb__link">{_("Networking")}</BreadcrumbItem>
-                          <BreadcrumbItem isActive>{_("Firewall")}</BreadcrumbItem>
-                      </Breadcrumb>}
-                  additionalGroupedContent={
-                      <PageSection id="firewall-heading" variant={PageSectionVariants.light} className="firewall-heading">
-                          <Flex alignItems={{ default: 'alignItemsCenter' }} justifyContent={{ default: 'justifyContentSpaceBetween' }}>
-                              <Flex alignItems={{ default: 'alignItemsCenter' }} id="firewall-heading-title-group">
-                                  <Title headingLevel="h2" size="3xl">
-                                      {_("Firewall")}
-                                  </Title>
-                                  <FirewallSwitch firewall={firewall} />
-                                  <p>{_("Incoming requests are blocked by default. Outgoing requests are not blocked.")}</p>
-                              </Flex>
-                              { enabled && !firewall.readonly && <span className="btn-group">{addZoneAction}</span> }
-                          </Flex>
-                      </PageSection>}>
+            <Page>
+                <PageBreadcrumb stickyOnBreakpoint={{ default: "top" }}>
+                    <Breadcrumb>
+                        <BreadcrumbItem onClick={go_up} className="pf-v5-c-breadcrumb__link">{_("Networking")}</BreadcrumbItem>
+                        <BreadcrumbItem isActive>{_("Firewall")}</BreadcrumbItem>
+                    </Breadcrumb>
+                </PageBreadcrumb>
+                <PageSection id="firewall-heading" variant={PageSectionVariants.light} className="firewall-heading">
+                    <Flex alignItems={{ default: 'alignItemsCenter' }} justifyContent={{ default: 'justifyContentSpaceBetween' }}>
+                        <Flex alignItems={{ default: 'alignItemsCenter' }} id="firewall-heading-title-group">
+                            <Title headingLevel="h2" size="3xl">
+                                {_("Firewall")}
+                            </Title>
+                            <FirewallSwitch firewall={firewall} />
+                            <p>{_("Incoming requests are blocked by default. Outgoing requests are not blocked.")}</p>
+                        </Flex>
+                        { enabled && !firewall.readonly && <span className="btn-group">{addZoneAction}</span> }
+                    </Flex>
+                </PageSection>
                 <PageSection id="zones-listing">
                     { enabled && <Stack hasGutter>
                         {

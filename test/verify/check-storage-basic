@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,67 +15,79 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from storagelib import StorageCase
-from testlib import nondestructive, test_main, wait
+import storagelib
+import testlib
 
 
-@nondestructive
-class TestStorageBasic(StorageCase):
+@testlib.nondestructive
+class TestStorageBasic(storagelib.StorageCase):
 
     def testBasic(self):
         m = self.machine
         b = self.browser
 
         self.login_and_go("/storage", superuser=False)
+        self.allow_browser_errors("error: findmnt.*")
 
-        b.wait_visible("#devices")
-        b.wait_not_present("#devices .pf-c-dropdown button")
+        create_dropdown = self.dropdown_toggle(self.card_header("Storage"))
+
+        b.wait_visible(self.card("Storage"))
+        b.wait_not_present(create_dropdown)
 
         b.relogin('/storage', superuser=True)
 
-        b.wait_visible("#devices .pf-c-dropdown button:not([disabled])")
+        b.wait_visible(create_dropdown)
 
         # Add a disk, partition it, format it, and finally remove it.
         disk = self.add_ram_disk()
 
-        b.click(f'.sidepanel-row:contains("{disk}")')
-        b.wait_visible('#storage-detail')
-        self.content_row_wait_in_col(1, 2, "Unrecognized data")
+        self.click_card_row("Storage", name=disk)
+        b.wait_visible(self.card("Solid State Drive"))
 
-        def info_field_value(name):
-            return b.text(f'#detail-header dt:contains("{name}") + dd')
+        b.wait_text(self.card_desc("Solid State Drive", "Model"), "scsi_debug")
+        b.wait_in_text(self.card_desc("Solid State Drive", "Capacity"), "50 MiB")
 
-        self.assertEqual(self.inode(info_field_value("Device file")), self.inode(disk))
+        self.assertEqual(self.inode(b.text(self.card_desc("Solid State Drive", "Device file"))), self.inode(disk))
 
         m.execute(f'parted -s {disk} mktable gpt')
         m.execute(f'parted -s {disk} mkpart primary ext2 1M 8M')
-        self.content_row_wait_in_col(1, 2, "Unrecognized data")
-        self.content_tab_wait_in_info(1, 1, "Name", "primary")
+        b.wait_text(self.card_row_col("GPT partitions", 1, 2), "Unformatted data")
 
         # create filesystem on the first partition
         # HACK - the block device might disappear briefly when udevd does its BLKRRPART.
-        wait(lambda: m.execute(f'mke2fs {disk}1'), delay=1, tries=5)
-        self.content_row_wait_in_col(1, 2, "ext2 filesystem")
+        testlib.wait(lambda: m.execute(f'mke2fs {disk}1'), delay=1, tries=5)
+        b.wait_text(self.card_row_col("GPT partitions", 1, 2), "ext2 filesystem")
 
-        self.content_tab_expand(1, 1)
-        b.assert_pixels("#detail-content", "partition", ignore=[
-            # UUID is not stable
-            "dt:contains(UUID) + dd",
-            # browsers/harfbuzz don't render "ext2 filesystem" label reliably
-            "td[data-label='Type']",
-        ])
-        self.content_tab_expand(1, 2)
-        b.assert_pixels("#detail-content", "filesystem")
+        self.click_card_row("GPT partitions", 1)
+        b.wait_text(self.card_desc("Partition", "Name"), "primary")
+        b.assert_pixels(self.card("Partition"), "partition",
+                        mock={"dt:contains(UUID) + dd": "a12978a1-5d6e-f24f-93de-11789977acde"})
+        b.assert_pixels(self.card("ext2 filesystem"), "filesystem")
 
         b.go("#/")
-        b.wait_visible('#storage')
-        b.wait_in_text("#drives", disk)
+        b.wait_visible(self.card("Storage"))
+        b.wait_visible(self.card_row("Storage", name=disk))
+
+        # Create a subvolume with a really long name to show
+        # truncation in the pixel test.
+
+        if b.pixels_label:
+            long = "really-" * 15 + "long-name-that-will-be-truncated"
+            m.execute(f"btrfs subvol create /{long}")
+            self.addCleanup(m.execute, f"btrfs subvol delete /{long}")
+            b.wait_visible(self.card_row("Storage", name=long))
+        b.assert_pixels(self.card("Storage"), "overview",
+                        # Usage numbers are not stable and also cause
+                        # the table columns to shift. The usage bars
+                        # are not stable but are always the same size,
+                        # so it is good enough to ignore them.
+                        mock={".usage-text": "---"},
+                        ignore=[".usage-bar"])
         self.force_remove_disk(disk)
-        b.wait_not_in_text("#drives", disk)
+        b.wait_not_present(self.card_row("Storage", name=disk))
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

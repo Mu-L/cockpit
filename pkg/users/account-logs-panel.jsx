@@ -14,17 +14,16 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
 import React, { useState } from 'react';
 
 import { Card, CardBody, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
-import { Text } from "@patternfly/react-core/dist/esm/components/Text/index.js";
 import { ListingTable } from 'cockpit-components-table.jsx';
 
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
 import { useInit } from "hooks";
 
 const _ = cockpit.gettext;
@@ -32,7 +31,7 @@ const _ = cockpit.gettext;
 export function AccountLogs({ name }) {
     const [logins, setLogins] = useState([]);
     useInit(() => {
-        cockpit.spawn(["last", "--time-format", "iso", "-n", 25, name], { environ: ["LC_ALL=C"] })
+        cockpit.spawn(["last", "--time-format", "iso", "-n25", "--fullnames", name], { environ: ["LC_ALL=C"] })
                 .then(data => {
                     let logins = [];
                     data.split('\n').forEach(line => {
@@ -66,16 +65,12 @@ export function AccountLogs({ name }) {
                     logins = logins.slice(0, 15);
                     setLogins(logins);
                 })
-                .catch((ex) => {
-                    console.error(ex);
-                });
+                .catch(ex => console.error("Failed to call last:", ex)); // not-covered: OS error
     }, [name]);
 
     return (
         <Card id="account-logs">
-            <CardTitle>
-                <Text component="h2">{_("Login history")}</Text>
-            </CardTitle>
+            <CardTitle component="h2">{_("Login history")}</CardTitle>
             <CardBody className="contains-list">
                 <ListingTable variant="compact" aria-label={ _("Login history list") }
                     columns={ [

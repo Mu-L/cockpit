@@ -13,82 +13,77 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 """Tools for writing Cockpit test cases."""
 
-from time import sleep
-
 import argparse
+import asyncio
 import base64
+import contextlib
 import errno
 import fnmatch
+import glob
+import io
+import json
+import logging
 import os
+import re
 import shutil
 import socket
-import sys
-import traceback
 import subprocess
-import re
-import json
+import sys
 import tempfile
+import threading
 import time
+import traceback
 import unittest
-import gzip
-import itertools
-import glob
+from collections.abc import Collection, Container, Coroutine, Iterator, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Callable, ClassVar, Literal, TypedDict, TypeVar
 
-from typing import Any, Callable, Dict, List, Optional, Union
-
-import testvm
-import cdp
-
-from lib.constants import OSTREE_IMAGES
-
+import webdriver_bidi
 from lcov import write_lcov
+from lib.constants import OSTREE_IMAGES
+from machine import testvm
+from PIL import Image
 
-try:
-    from PIL import Image
-    import io
-except ImportError:
-    Image = None
+_T = TypeVar('_T')
+_FT = TypeVar("_FT", bound=Callable[..., Any])
+
+JsonObject = dict[str, Any]
 
 BASE_DIR = os.path.realpath(f'{__file__}/../../..')
 TEST_DIR = f'{BASE_DIR}/test'
 BOTS_DIR = f'{BASE_DIR}/bots'
 
-os.environ["PATH"] = "{0}:{1}:{2}".format(os.environ.get("PATH"), BOTS_DIR, TEST_DIR)
+os.environ["PATH"] = f"{os.environ.get('PATH')}:{BOTS_DIR}:{TEST_DIR}"
 
 # Be careful when changing this string, check in cockpit-project/bots where it is being used
 UNEXPECTED_MESSAGE = "FAIL: Test completed, but found unexpected "
 PIXEL_TEST_MESSAGE = "Some pixel tests have failed"
 
 __all__ = (
-    # Test definitions
-    'test_main',
-    'arg_parser',
-    'Browser',
-    'MachineCase',
-    'nondestructive',
-    'no_retry_when_changed',
-    'skipImage',
-    'skipDistroPackage',
-    'skipMobile',
-    'skipOstree',
-    'skipBrowser',
-    'skipPackage',
-    'todo',
-    'todoPybridge',
-    'enableAxe',
-    'timeout',
-    'Error',
-
-    'sit',
-    'wait',
-    'opts',
+    'PIXEL_TEST_MESSAGE',
     'TEST_DIR',
     'UNEXPECTED_MESSAGE',
-    'PIXEL_TEST_MESSAGE'
+    'Browser',
+    'Error',
+    'MachineCase',
+    'arg_parser',
+    'destructive',
+    'no_retry_when_changed',
+    'nondestructive',
+    'onlyImage',
+    'opts',
+    'sit',
+    'skipBrowser',
+    'skipImage',
+    'skipOstree',
+    'test_main',
+    'timeout',
+    'todo',
+    'wait',
 )
 
 # Command line options
@@ -101,6 +96,29 @@ opts.address = None
 opts.jobs = 1
 opts.fetch = True
 opts.coverage = False
+
+
+# https://w3c.github.io/webdriver/#keyboard-actions for encoding key names
+WEBDRIVER_KEYS = {
+    "Backspace": "\uE003",
+    "Tab": "\uE004",
+    "Return": "\uE006",
+    "Enter": "\uE007",
+    "Shift": "\uE008",
+    "Control": "\uE009",
+    "Alt": "\uE00A",
+    "Escape": "\uE00C",
+    "Space": "\uE00D",
+    "ArrowLeft": "\uE012",
+    "ArrowUp": "\uE013",
+    "ArrowRight": "\uE014",
+    "ArrowDown": "\uE015",
+    "Insert": "\uE016",
+    "Delete": "\uE017",
+    "Meta": "\uE03D",
+    "F2": "\uE032",
+}
+
 
 # Browser layouts
 #
@@ -125,47 +143,53 @@ opts.coverage = False
 # The browser starts out in the first layout of this list, which is
 # "desktop" by default.
 
-default_layouts = [
+class BrowserLayout(TypedDict):
+    name: str
+    theme: Literal["light"] | Literal["dark"]
+    shell_size: tuple[int, int]
+    content_size: tuple[int, int]
+
+
+default_layouts: Sequence[BrowserLayout] = (
     {
         "name": "desktop",
         "theme": "light",
-        "shell_size": [1920, 1200],
-        "content_size": [1680, 1130]
+        "shell_size": (1920, 1200),
+        "content_size": (1680, 1130)
     },
     {
         "name": "medium",
         "theme": "light",
-        "is_mobile": False,
-        "shell_size": [1280, 768],
-        "content_size": [1040, 698]
+        "shell_size": (1280, 768),
+        "content_size": (1040, 698)
     },
     {
         "name": "mobile",
         "theme": "light",
-        "shell_size": [414, 1920],
-        "content_size": [414, 1856]
+        "shell_size": (414, 1920),
+        "content_size": (414, 1856)
     },
     {
         "name": "dark",
         "theme": "dark",
-        "shell_size": [1920, 1200],
-        "content_size": [1680, 1130]
+        "shell_size": (1920, 1200),
+        "content_size": (1680, 1130)
     },
     {
         "name": "rtl",
         "theme": "light",
-        "shell_size": [1920, 1200],
-        "content_size": [1680, 1130]
+        "shell_size": (1920, 1200),
+        "content_size": (1680, 1130)
     },
-]
+)
 
 
-def attach(filename: str, move: bool = False):
+def attach(filename: str, move: bool = False) -> None:
     """Put a file into the attachments directory.
 
     :param filename: file to put in attachments directory
     :param move: set this to true to move dynamically generated files which
-                 are not touched by parallel tests. (default False)
+                 are not touched by destructive tests. (default False)
     """
     if not opts.attachments:
         return
@@ -177,8 +201,33 @@ def attach(filename: str, move: bool = False):
             shutil.copy(filename, dest)
 
 
+def unique_filename(base: str, ext: str) -> str:
+    for i in range(20):
+        if i == 0:
+            f = f"{base}.{ext}"
+        else:
+            f = f"{base}-{i}.{ext}"
+        if not os.path.exists(f):
+            return f
+    return f"{base}.{ext}"
+
+
 class Browser:
-    def __init__(self, address, label, machine, pixels_label=None, coverage_label=None, port=None):
+    driver: webdriver_bidi.WebdriverBidi
+    browser: str
+    layouts: Sequence[BrowserLayout]
+    current_layout: BrowserLayout | None
+    port: str | int
+
+    def __init__(
+        self,
+        address: str,
+        label: str,
+        machine: 'MachineCase',
+        pixels_label: str | None = None,
+        coverage_label: str | None = None,
+        port: int | str | None = None
+    ) -> None:
         if ":" in address:
             self.address, _, self.port = address.rpartition(":")
         else:
@@ -189,34 +238,116 @@ class Browser:
         self.default_user = "admin"
         self.label = label
         self.pixels_label = pixels_label
-        self.used_pixel_references = set()
+        self.used_pixel_references = set[str]()
         self.coverage_label = coverage_label
         self.machine = machine
-        path = os.path.dirname(__file__)
-        sizzle_js = os.path.join(path, "../../node_modules/sizzle/dist/sizzle.js")
-        self.cdp = cdp.CDP("C.utf8", verbose=opts.trace, trace=opts.trace,
-                           inject_helpers=[os.path.join(path, "test-functions.js"), sizzle_js],
-                           start_profile=coverage_label is not None)
+
+        headless = os.environ.get("TEST_SHOW_BROWSER", '0') == '0'
+        self.browser = os.environ.get("TEST_BROWSER", "chromium")
+        if self.browser == "chromium":
+            self.driver = webdriver_bidi.ChromiumBidi(headless=headless)
+        elif self.browser == "firefox":
+            self.driver = webdriver_bidi.FirefoxBidi(headless=headless)
+        else:
+            raise ValueError(f"unknown browser {self.browser}")
+        self.loop = asyncio.new_event_loop()
+        self.bidi_thread = threading.Thread(target=self.asyncio_loop_thread, args=(self.loop,))
+        self.bidi_thread.start()
+
+        self.run_async(self.driver.start_session())
+
+        if opts.trace:
+            logging.basicConfig(level=logging.INFO)
+            webdriver_bidi.log_command.setLevel(logging.INFO if opts.trace else logging.WARNING)
+            # not appropriate for --trace, just enable for debugging low-level protocol with browser
+            # webdriver_bidi.log_proto.setLevel(logging.DEBUG)
+
+        test_functions = (Path(__file__).parent / "test-functions.js").read_text()
+        # Don't redefine globals, this confuses Firefox
+        test_functions = "if (window.ph_select) return; " + test_functions
+        self.bidi("script.addPreloadScript", quiet=True, functionDeclaration=f"() => {{ {test_functions} }}")
+
+        try:
+            sizzle_js = (Path(__file__).parent.parent.parent / "node_modules/sizzle/dist/sizzle.js").read_text()
+            # HACK: injecting sizzle fails on missing `document` in assert()
+            sizzle_js = sizzle_js.replace('function assert( fn ) {',
+                                          'function assert( fn ) { if (true) return true; else ')
+            # HACK: sizzle tracks document and when we switch frames, it sees the old document
+            # although we execute it in different context.
+            sizzle_js = sizzle_js.replace('context = context || document;', 'context = context || window.document;')
+            self.bidi("script.addPreloadScript", quiet=True, functionDeclaration=f"() => {{ {sizzle_js} }}")
+        except FileNotFoundError:
+            pass
+
+        if coverage_label:
+            self.cdp_command("Profiler.enable")
+            self.cdp_command("Profiler.startPreciseCoverage", callCount=False, detailed=True)
+
         self.password = "foobar"
         self.timeout_factor = int(os.getenv("TEST_TIMEOUT_FACTOR", "1"))
+        self.timeout = 15
         self.failed_pixel_tests = 0
         self.allow_oops = False
-        self.body_clip = None
         try:
             with open(f'{TEST_DIR}/browser-layouts.json') as fp:
                 self.layouts = json.load(fp)
         except FileNotFoundError:
             self.layouts = default_layouts
-        # Firefox CDP does not support setting EmulatedMedia
-        # https://bugzilla.mozilla.org/show_bug.cgi?id=1549434
-        if self.cdp.browser.name != "chromium":
-            self.layouts = [layout for layout in self.layouts if layout["theme"] != "dark"]
         self.current_layout = None
 
-    def title(self):
-        return self.cdp.eval('document.title')
+    def _is_running(self) -> bool:
+        """True initially, false after calling .kill()"""
 
-    def open(self, href: str, cookie: Optional[str] = None, tls: bool = False):
+        return self.driver is not None and self.driver.bidi_session is not None
+
+    def have_test_api(self) -> bool:
+        """Check if the browser is running and has a Cockpit page
+
+        I.e. are our test-functions.js available? This is only true after
+        opening cockpit, not for the initial blank page (before login_and_go)
+        or other URLs like Grafana.
+        """
+        if not self._is_running():
+            return False
+        return self.eval_js("!!window.ph_find")
+
+    def run_async(self, coro: Coroutine[Any, Any, Any]) -> JsonObject:
+        """Run coro in main loop in our BiDi thread
+
+        Wait for the result and return it.
+        """
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    @staticmethod
+    def asyncio_loop_thread(loop: asyncio.AbstractEventLoop) -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
+
+    def kill(self) -> None:
+        if not self._is_running():
+            return
+        self.run_async(self.driver.close())
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.bidi_thread.join()
+
+    def bidi(self, method: str, **params: Any) -> webdriver_bidi.JsonObject:
+        """Send a Webdriver BiDi command and return the JSON response"""
+
+        try:
+            return self.run_async(self.driver.bidi(method, **params))
+        except webdriver_bidi.WebdriverError as e:
+            raise Error(str(e)) from None
+
+    def cdp_command(self, method: str, **params: Any) -> webdriver_bidi.JsonObject:
+        """Send a Chrome DevTools Protocol command and return the JSON response"""
+
+        if self.browser == "chromium":
+            assert isinstance(self.driver, webdriver_bidi.ChromiumBidi)
+            return self.run_async(self.driver.cdp(method, **params))
+        else:
+            raise webdriver_bidi.WebdriverError("CDP is only supported in Chromium")
+
+    def open(self, href: str, cookie: Mapping[str, str] | None = None, tls: bool = False) -> None:
         """Load a page into the browser.
 
         :param href: the path of the Cockpit page to load, such as "/users". Either PAGE or URL needs to be given.
@@ -227,7 +358,7 @@ class Browser:
           Error: When a timeout occurs waiting for the page to load.
         """
         if href.startswith("/"):
-            schema = tls and "https" or "http"
+            schema = "https" if tls else "http"
             href = "%s://%s:%s%s" % (schema, self.address, self.port, href)
 
         if not self.current_layout and os.environ.get("TEST_SHOW_BROWSER") in [None, "pixels"]:
@@ -235,20 +366,28 @@ class Browser:
             size = self.current_layout["shell_size"]
             self._set_window_size(size[0], size[1])
         if cookie:
-            self.cdp.invoke("Network.setCookie", **cookie)
+            c = {**cookie, "value": {"type": "string", "value": cookie["value"]}}
+            self.bidi("storage.setCookie", cookie=c)
 
         self.switch_to_top()
-        self.cdp.invoke("Page.navigate", url=href)
+        # Some browsers optimize this away if the current URL is already href
+        # (e.g. in TestKeys.testAuthorizedKeys). Load the blank page first to always
+        # force a load.
+        self.bidi("browsingContext.navigate", context=self.driver.context, url="about:blank", wait="complete")
+        self.bidi("browsingContext.navigate", context=self.driver.context, url=href, wait="complete")
 
-    def set_user_agent(self, ua: str):
+    def set_user_agent(self, ua: str) -> None:
         """Set the user agent of the browser
 
         :param ua: user agent string
         :type ua: str
         """
-        self.cdp.invoke("Emulation.setUserAgentOverride", userAgent=ua)
+        if self.browser == "chromium":
+            self.cdp_command("Emulation.setUserAgentOverride", userAgent=ua)
+        else:
+            raise NotImplementedError
 
-    def reload(self, ignore_cache: bool = False):
+    def reload(self, ignore_cache: bool = False) -> None:
         """Reload the current page
 
         :param ignore_cache: if true browser cache is ignored (default False)
@@ -256,12 +395,19 @@ class Browser:
         """
 
         self.switch_to_top()
-        self.wait_js_cond("ph_select('iframe.container-frame').every(function (e) { return e.getAttribute('data-loaded'); })")
-        self.cdp.invoke("reloadPageAndWait", ignoreCache=ignore_cache)
+        self.wait_js_cond("ph_select('iframe.container-frame').every(e => e.getAttribute('data-loaded'))")
+        if self.browser == "firefox":
+            if ignore_cache:
+                webdriver_bidi.log_command.warning(
+                    "Browser.reload(): ignore_cache==True not yet supported with Firefox, ignoring")
+            self.bidi("browsingContext.reload", context=self.driver.context, wait="complete")
+        else:
+            self.bidi("browsingContext.reload", context=self.driver.context, ignoreCache=ignore_cache,
+                      wait="complete")
 
         self.machine.allow_restart_journal_messages()
 
-    def switch_to_frame(self, name: str):
+    def switch_to_frame(self, name: str | None) -> None:
         """Switch to frame in browser tab
 
         Each page has a main frame and can have multiple subframes, usually
@@ -269,64 +415,44 @@ class Browser:
 
         :param name: frame name
         """
-        self.cdp.set_frame(name)
+        if name is None:
+            self.switch_to_top()
+        else:
+            self.run_async(self.driver.switch_to_frame(name))
 
-    def switch_to_top(self):
+    def switch_to_top(self) -> None:
         """Switch to the main frame
 
         Switch to the main frame from for example an iframe.
         """
-        self.cdp.set_frame(None)
+        self.driver.switch_to_top()
 
-    def upload_file(self, selector: str, file: str):
-        r = self.cdp.invoke("Runtime.evaluate", expression='document.querySelector(%s)' % jsquote(selector))
-        objectId = r["result"]["objectId"]
-        self.cdp.invoke("DOM.setFileInputFiles", files=[file], objectId=objectId)
+    def allow_download(self) -> None:
+        """Allow browser downloads"""
+        # this is only necessary for headless chromium
+        if self.browser == "chromium":
+            self.cdp_command("Browser.setDownloadBehavior", behavior="allow",
+                             downloadPath=str(self.driver.download_dir))
 
-    def raise_cdp_exception(self, func, arg, details, trailer=None):
-        # unwrap a typical error string
-        if details.get("exception", {}).get("type") == "string":
-            msg = details["exception"]["value"]
-        elif details.get("text", None):
-            msg = details.get("text", None)
-        else:
-            msg = str(details)
-        if trailer:
-            msg += "\n" + trailer
-        raise Error("%s(%s): %s" % (func, arg, msg))
+    def upload_files(self, selector: str, files: Sequence[str]) -> None:
+        """Upload a local file to the browser
 
-    def inject_js(self, code: str):
-        """Execute JS code that does not return anything
-
-        :param code: a string containing JavaScript code
-        :type code: str
+        The selector should select the <input type="file"/> element.
+        Files is a list of absolute paths to files which should be uploaded.
         """
-        self.cdp.invoke("Runtime.evaluate", expression=code, trace=code,
-                        silent=False, awaitPromise=True, returnByValue=False, no_trace=True)
+        element = self.eval_js(f"ph_find({jsquote(selector)})")
+        self.bidi("input.setFiles", context=self.driver.context, element=element, files=files)
 
-    def eval_js(self, code: str, no_trace: bool = False) -> Optional[Any]:
+    def eval_js(self, code: str, no_trace: bool = False) -> Any:
         """Execute JS code that returns something
 
         :param code: a string containing JavaScript code
         :param no_trace: do not print information about unknown return values (default False)
         """
-        result = self.cdp.invoke("Runtime.evaluate", expression=code, trace=code,
-                                 silent=False, awaitPromise=True, returnByValue=True, no_trace=no_trace)
-        if "exceptionDetails" in result:
-            self.raise_cdp_exception("eval_js", code, result["exceptionDetails"])
-        _type = result.get("result", {}).get("type")
-        if _type == 'object' and result["result"].get("subtype", "") == "error":
-            raise Error(result["result"]["description"])
-        if _type == "undefined":
-            return None
-        if _type and "value" in result["result"]:
-            return result["result"]["value"]
+        return self.bidi("script.evaluate", expression=code, quiet=no_trace,
+                         awaitPromise=True, target={"context": self.driver.context})["result"]
 
-        if opts.trace:
-            print("eval_js(%s): cannot interpret return value %s" % (code, result))
-        return None
-
-    def call_js_func(self, func: str, *args: Any) -> Optional[Any]:
+    def call_js_func(self, func: str, *args: object) -> Any:
         """Call a JavaScript function
 
         :param func: JavaScript function to call
@@ -334,22 +460,54 @@ class Browser:
         """
         return self.eval_js("%s(%s)" % (func, ','.join(map(jsquote, args))))
 
-    def cookie(self, name: str):
+    def set_mock(self, mock: Mapping[str, str], base: str = "") -> None:
+        """Replace some DOM elements with mock text
+
+        The 'mock' parameter is a dictionary from CSS selectors to the
+        text that the elements matching the selector should be
+        replaced with.
+
+        XXX - There is no way to easily undo the effects of this
+              function.  There is no coordination with React.  This
+              will improve as necessary.
+
+        :param mock: the mock data, see above
+        :param base: if given, all selectors are relative to this one
+        """
+        self.call_js_func('ph_set_texts', {base + " " + k: v for k, v in mock.items()})
+
+    def cookie(self, name: str) -> Mapping[str, object] | None:
         """Retrieve a browser cookie by name
 
         :param name: the name of the cookie
         :type name: str
         """
-        cookies = self.cdp.invoke("Network.getCookies")
-        for c in cookies["cookies"]:
-            if c["name"] == name:
-                return c
+        cookies = self.bidi("storage.getCookies", filter={"name": name})["cookies"]
+        if len(cookies) > 0:
+            c = cookies[0]
+            # if we ever need to handle "base64", add that
+            assert c["value"]["type"] == "string"
+            c["value"] = c["value"]["value"]
+            return c
         return None
 
-    def go(self, hash: str, host: str = "localhost"):
-        self.call_js_func('ph_go', hash)
+    def go(self, url_hash: str) -> None:
+        self.call_js_func('ph_go', url_hash)
 
-    def mouse(self, selector: str, type: str, x: int = 0, y: int = 0, btn: int = 0, ctrlKey: bool = False, shiftKey: bool = False, altKey: bool = False, metaKey: bool = False):
+    def mouse(
+        self,
+        selector: str,
+        event: str,
+        x: int = 0,
+        y: int = 0,
+        btn: int = 0,
+        *,
+        ctrlKey: bool = False,
+        shiftKey: bool = False,
+        altKey: bool = False,
+        metaKey: bool = False,
+        scrollVisible: bool = True,
+    ) -> None:
         """Simulate a browser mouse event
 
         :param selector: the element to interact with
@@ -361,21 +519,80 @@ class Browser:
         :param shiftKey: press the shift key
         :param altKey: press the alt key
         :param metaKey: press the meta key
+        :param scrollVisible: set to False in rare cases where scrolling an element into view triggers side effects
         """
         self.wait_visible(selector)
-        self.call_js_func('ph_mouse', selector, type, x, y, btn, ctrlKey, shiftKey, altKey, metaKey)
 
-    def click(self, selector: str):
+        # HACK: Chromium clicks don't work with iframes; use our old "synthesize MouseEvent" approach
+        # https://issues.chromium.org/issues/359616812
+        # TODO: x and y are not currently implemented: webdriver (0, 0) is the element's center, not top left corner
+        if (self.browser == "chromium" and not self.driver.in_top_context()) or x != 0 or y != 0:
+            self.call_js_func('ph_mouse', selector, event, x, y, btn, ctrlKey, shiftKey, altKey, metaKey)
+            return
+
+        # For Firefox and top frame with Chromium, use the BiDi API, which is more realistic -- it doesn't
+        # sidestep the browser
+        element = self.call_js_func('ph_find_scroll_into_view' if scrollVisible else 'ph_find', selector)
+
+        # btn=2 for context menus doesn't work with ph_mouse(); so translate the old ph_mouse() API
+        if event == "contextmenu":
+            assert btn == 0, "contextmenu event can only be done with default 'btn' value"
+            btn = 2
+            event = "click"
+
+        actions = [{"type": "pointerMove", "x": 0, "y": 0, "origin": {"type": "element", "element": element}}]
+        down = {"type": "pointerDown", "button": btn}
+        up = {"type": "pointerUp", "button": btn}
+        if event == "click":
+            actions.extend([down, up])
+        elif event == "dblclick":
+            actions.extend([down, up, down, up])
+        elif event == "mouseenter":
+            actions.insert(0, {"type": "pointerMove", "x": 0, "y": 0, "origin": "viewport"})
+        elif event == "mouseleave":
+            actions.append({"type": "pointerMove", "x": 0, "y": 0, "origin": "viewport"})
+        else:
+            raise NotImplementedError(f"unknown event {event}")
+
+        # modifier keys
+        ev_id = f"pointer-{self.driver.last_id}"
+        keys_pre = []
+        keys_post = []
+
+        def key(type_: str, name: str) -> JsonObject:
+            return {"type": "key", "id": ev_id + type_, "actions": [{"type": type_, "value": WEBDRIVER_KEYS[name]}]}
+
+        if altKey:
+            keys_pre.append(key("keyDown", "Alt"))
+            keys_post.append(key("keyUp", "Alt"))
+        if ctrlKey:
+            keys_pre.append(key("keyDown", "Control"))
+            keys_post.append(key("keyUp", "Control"))
+        if shiftKey:
+            keys_pre.append(key("keyDown", "Shift"))
+            keys_post.append(key("keyUp", "Shift"))
+        if metaKey:
+            keys_pre.append(key("keyDown", "Meta"))
+            keys_post.append(key("keyUp", "Meta"))
+
+        # the actual mouse event
+        actions = [{
+            "id": ev_id,
+            "type": "pointer",
+            "parameters": {"pointerType": "mouse"},
+            "actions": actions,
+        }]
+
+        self.bidi("input.performActions", context=self.driver.context, actions=keys_pre + actions + keys_post)
+
+    def click(self, selector: str) -> None:
         """Click on a ui element
 
         :param selector: the selector to click on
         """
-        self.mouse(selector + ":not([disabled]):not([aria-disabled=true])", "click", 0, 0, 0)
+        self.mouse(selector + ":not([disabled]):not([aria-disabled=true])", "click")
 
-    def mousedown(self, selector: str):
-        self.mouse(selector + ":not([disabled]):not([aria-disabled=true])", "mousedown", 0, 0, 0)
-
-    def val(self, selector):
+    def val(self, selector: str) -> Any:
         """Get the value attribute of a selector.
 
         :param selector: the selector to get the value of
@@ -383,7 +600,7 @@ class Browser:
         self.wait_visible(selector)
         return self.call_js_func('ph_val', selector)
 
-    def set_val(self, selector: str, val):
+    def set_val(self, selector: str, val: object) -> None:
         """Set the value attribute of a non disabled DOM element.
 
         This also emits a change DOM change event.
@@ -394,15 +611,15 @@ class Browser:
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
         self.call_js_func('ph_set_val', selector, val)
 
-    def text(self, selector: str):
+    def text(self, selector: str) -> str:
         """Get an element's textContent value.
 
         :param selector: the selector to get the value of
         """
         self.wait_visible(selector)
-        return self.call_js_func('ph_text', selector)
+        return self.call_js_func('ph_text', selector) or ''
 
-    def attr(self, selector: str, attr):
+    def attr(self, selector: str, attr: str) -> Any:
         """Get the value of a given attribute of an element.
 
         :param selector: the selector to get the attribute of
@@ -411,7 +628,7 @@ class Browser:
         self._wait_present(selector)
         return self.call_js_func('ph_attr', selector, attr)
 
-    def set_attr(self, selector, attr, val):
+    def set_attr(self, selector: str, attr: str, val: object) -> None:
         """Set an attribute value of an element.
 
         :param selector: the selector
@@ -421,7 +638,7 @@ class Browser:
         self._wait_present(selector + ':not([disabled]):not([aria-disabled=true])')
         self.call_js_func('ph_set_attr', selector, attr, val)
 
-    def get_checked(self, selector: str):
+    def get_checked(self, selector: str) -> bool:
         """Get checked state of a given selector.
 
         :param selector: the selector
@@ -430,16 +647,18 @@ class Browser:
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
         return self.call_js_func('ph_get_checked', selector)
 
-    def set_checked(self, selector: str, val):
+    def set_checked(self, selector: str, val: bool) -> None:
         """Set checked state of a given selector.
 
         :param selector: the selector
         :param val: boolean value to enable or disable checkbox
         """
-        self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
-        self.call_js_func('ph_set_checked', selector, val)
+        # avoid ph_set_checked, that doesn't use proper mouse emulation
+        checked = self.get_checked(selector)
+        if checked != val:
+            self.click(selector)
 
-    def focus(self, selector: str):
+    def focus(self, selector: str) -> None:
         """Set focus on selected element.
 
         :param selector: the selector
@@ -447,7 +666,7 @@ class Browser:
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
         self.call_js_func('ph_focus', selector)
 
-    def blur(self, selector: str):
+    def blur(self, selector: str) -> None:
         """Remove keyboard focus from selected element.
 
         :param selector: the selector
@@ -455,237 +674,224 @@ class Browser:
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
         self.call_js_func('ph_blur', selector)
 
-    # TODO: Unify them so we can have only one
-    def key_press(self, keys: str, modifiers: int = 0, use_ord: bool = False):
-        if self.cdp.browser.name == "chromium":
-            self._key_press_chromium(keys, modifiers, use_ord)
-        else:
-            self._key_press_firefox(keys, modifiers, use_ord)
+    def input_text(self, text: str) -> None:
+        actions = []
+        for c in text:
+            # quality-of-life special case
+            if c == '\n':
+                c = WEBDRIVER_KEYS["Enter"]
+            actions.append({"type": "keyDown", "value": c})
+            actions.append({"type": "keyUp", "value": c})
+        self.bidi("input.performActions", context=self.driver.context, actions=[
+            {"type": "key", "id": "key-0", "actions": actions}])
 
-    def _key_press_chromium(self, keys, modifiers=0, use_ord=False):
-        for key in keys:
-            args = {"type": "keyDown", "modifiers": modifiers}
+    def key(self, name: str, repeat: int = 1, modifiers: list[str] | None = None) -> None:
+        """Press and release a named keyboard key.
 
-            # If modifiers are used we need to pass windowsVirtualKeyCode which is
-            # basically the asci decimal representation of the key
-            args["text"] = key
-            if use_ord:
-                args["windowsVirtualKeyCode"] = ord(key)
-            elif (not key.isalnum() and ord(key) < 32) or modifiers != 0:
-                args["windowsVirtualKeyCode"] = ord(key.upper())
-            else:
-                args["key"] = key
+        Use this function to input special characters or modifiers.
 
-            self.cdp.invoke("Input.dispatchKeyEvent", **args)
-            args["type"] = "keyUp"
-            self.cdp.invoke("Input.dispatchKeyEvent", **args)
+        :param name: ASCII value or key name like "Enter", "Delete", or "ArrowLeft" (entry in WEBDRIVER_KEYS)
+        :param repeat: number of times to repeat this key (default 1)
+        :param modifiers: "Shift", "Control", "Alt"
+        """
+        actions = []
+        actions_pre = []
+        actions_post = []
+        keycode = WEBDRIVER_KEYS.get(name, name)
 
-    def _key_press_firefox(self, keys, modifiers=0, use_ord=False):
-        # https://github.com/GoogleChrome/puppeteer/blob/master/lib/USKeyboardLayout.js
-        keyMap = {
-            8: "Backspace",   # Backspace key
-            9: "Tab",         # Tab key
-            13: "Enter",      # Enter key
-            27: "Escape",     # Escape key
-            37: "ArrowLeft",  # Arrow key left
-            40: "ArrowDown",  # Arrow key down
-            45: "Insert",     # Insert key
-        }
-        for key in keys:
-            args = {"type": "keyDown", "modifiers": modifiers}
+        for m in (modifiers or []):
+            actions_pre.append({"type": "keyDown", "value": WEBDRIVER_KEYS[m]})
+            actions_post.append({"type": "keyUp", "value": WEBDRIVER_KEYS[m]})
 
-            args["key"] = key
-            if ord(key) < 32 or use_ord:
-                args["key"] = keyMap[ord(key)]
+        for _ in range(repeat):
+            actions.append({"type": "keyDown", "value": keycode})
+            actions.append({"type": "keyUp", "value": keycode})
 
-            self.cdp.invoke("Input.dispatchKeyEvent", **args)
-            args["type"] = "keyUp"
-            self.cdp.invoke("Input.dispatchKeyEvent", **args)
+        self.bidi("input.performActions", context=self.driver.context, actions=[
+            {"type": "key", "id": "key-0", "actions": actions_pre + actions + actions_post}])
 
-    def select_from_dropdown(self, selector: str, value):
+    def select_from_dropdown(self, selector: str, value: object) -> None:
+        """For an actual <select> HTML component"""
+
         self.wait_visible(selector + ':not([disabled]):not([aria-disabled=true])')
-        text_selector = "{0} option[value='{1}']".format(selector, value)
+        text_selector = f"{selector} option[value='{value}']"
         self._wait_present(text_selector)
         self.set_val(selector, value)
         self.wait_val(selector, value)
 
-    def select_PF4(self, selector: str, value):
-        self.click(f"{selector}:not([disabled]):not([aria-disabled=true])")
-        select_entry = f"{selector} + ul button:contains('{value}')"
-        self.click(select_entry)
-        if self.is_present(f"{selector}.pf-m-typeahead"):
-            self.wait_val(f"{selector} > div input[type=text]", value)
-        else:
-            self.wait_text(f"{selector} .pf-c-select__toggle-text", value)
+    def select_PF(self, selector: str, value: str, menu_class: str = ".pf-v5-c-menu") -> None:
+        """For a PatternFly Select-like component
 
-    def set_input_text(self, selector, val, append=False, value_check=True, blur=True):
+        For things like <Select> or <TimePicker>. Unfortunately none of them render as an actual <select>, but a
+        <button> or <div> with a detached menu div (which can even be in the parent).
+
+        For similar components like the deprecated <Select> you can specify a different menu class.
+        """
+        self.click(selector)
+        # SelectOption's value does not render to an actual "value" attribute, just a <li> text
+        self.click(f"{menu_class} button:contains('{value}')")
+        self.wait_not_present(menu_class)
+
+    def set_input_text(
+        self, selector: str, val: str, append: bool = False, value_check: bool = True, blur: bool = True
+    ) -> None:
         self.focus(selector)
         if not append:
-            self.key_press("a", 2)  # Ctrl + a
+            self.key("a", modifiers=["Control"])
         if val == "":
-            self.key_press("\b")  # Backspace
+            self.key("Backspace")
         else:
-            self.key_press(val)
+            self.input_text(val)
         if blur:
             self.blur(selector)
 
         if value_check:
             self.wait_val(selector, val)
 
-    def set_file_autocomplete_val(self, group_identifier: str, location: str):
-        file_item_selector_template = "{0} li button:contains({1})"
+    def set_file_autocomplete_val(self, group_identifier: str, location: str) -> None:
+        self.set_input_text(f"{group_identifier} .pf-v5-c-menu-toggle input", location)
+        # select the file
+        self.wait_text(f"{group_identifier} ul li:nth-child(1) button", location)
+        self.click(f"{group_identifier} ul li:nth-child(1) button")
+        self.wait_not_present(f"{group_identifier} .pf-v5-c-menu")
+        self.wait_val(f"{group_identifier} .pf-v5-c-menu-toggle input", location)
 
-        path = ''
-        index = 0
-        for path_part in filter(None, location.split('/')):
-            self.click("{0} > div .pf-c-select__toggle-button".format(group_identifier))
-            self._wait_present(group_identifier + " .pf-c-select__menu")
-            path += '/' + path_part
-            file_item_selector = file_item_selector_template.format(group_identifier, path)
-            self.click(file_item_selector)
-            if index != len(list(filter(None, location.split('/')))) - 1 or location[-1] == '/':
-                self.wait_val("{0} > div input[type=text]".format(group_identifier), path + '/')
-            else:
-                self.wait_val("{0} > div input[type=text]".format(group_identifier), path)
-            index += 1
+    @contextlib.contextmanager
+    def wait_timeout(self, timeout: int) -> Iterator[None]:
+        old_timeout = self.timeout
+        self.timeout = timeout
+        yield
+        self.timeout = old_timeout
 
-        self.wait_val("{0} > div input[type=text]".format(group_identifier), location)
-
-    def wait_timeout(self, timeout: int):
-        browser = self
-
-        class WaitParamsRestorer():
-            def __init__(self, timeout):
-                self.timeout = timeout
-
-            def __enter__(self):
-                pass
-
-            def __exit__(self, type, value, traceback):
-                browser.cdp.timeout = self.timeout
-        r = WaitParamsRestorer(self.cdp.timeout)
-        self.cdp.timeout = timeout
-        return r
-
-    def wait(self, predicate: Callable):
-        for _ in range(self.cdp.timeout * self.timeout_factor * 5):
+    def wait(self, predicate: Callable[[], _T | None]) -> _T:
+        for _ in range(self.timeout * self.timeout_factor * 5):
             val = predicate()
             if val:
                 return val
             time.sleep(0.2)
         raise Error('timed out waiting for predicate to become true')
 
-    def wait_js_cond(self, cond: str, error_description: str = "null"):
-        count = 0
-        timeout = self.cdp.timeout * self.timeout_factor
+    def wait_js_cond(self, cond: str, error_description: str = "null") -> None:
+        timeout = self.timeout * self.timeout_factor
         start = time.time()
-        while True:
-            count += 1
+        last_error = None
+        for _retry in range(5):
             try:
-                result = self.cdp.invoke("Runtime.evaluate",
-                                         expression="ph_wait_cond(() => %s, %i, %s)" % (cond, timeout * 1000, error_description),
-                                         silent=False, awaitPromise=True, trace="wait: " + cond)
-                if "exceptionDetails" in result:
-                    trailer = "\n".join(self.cdp.get_js_log())
-                    self.raise_cdp_exception("timeout\nwait_js_cond", cond, result["exceptionDetails"], trailer)
+                self.bidi("script.evaluate",
+                          expression=f"ph_wait_cond(() => {cond}, {timeout * 1000}, {error_description})",
+                          awaitPromise=True, timeout=timeout + 5, target={"context": self.driver.context})
+
                 duration = time.time() - start
                 percent = int(duration / timeout * 100)
                 if percent >= 50:
-                    print(f"WARNING: Waiting for {cond} took {duration:.1f} seconds, which is {percent}% of the timeout.")
+                    print(f"WARNING: Waiting for {cond} took {duration:.1f} seconds, "
+                          f"which is {percent}% of the timeout.")
                 return
-            except RuntimeError as e:
-                data = e.args[0]
-                if count < 20 and type(data) == dict and "response" in data and data["response"].get("message") in ["Execution context was destroyed.", "Cannot find context with specified id"]:
-                    time.sleep(1)
-                else:
-                    raise e
+            except Error as e:
+                last_error = e
 
-    def wait_js_func(self, func: str, *args: Any):
+                # can happen when waiting across page reloads
+                if any(pattern in str(e) for pattern in [
+                    # during page loading
+                    "is not a function",
+                    # chromium
+                    "Execution context was destroyed",
+                    "Cannot find context",
+                    # firefox
+                    "MessageHandlerFrame' destroyed",
+                    # page helpers not yet loaded
+                    "ph_wait_cond is not defined",
+                   ]):
+                    if time.time() - start < timeout:
+                        webdriver_bidi.log_command.info("wait_js_cond: Ignoring/retrying %r", e)
+                        time.sleep(1)
+                        continue
+
+                break
+
+        assert last_error
+        # rewrite exception to have more context, also for compatibility with existing naughties
+        raise Error(f"timeout\nwait_js_cond({cond}): {last_error.msg}") from None
+
+    def wait_js_func(self, func: str, *args: object) -> None:
         self.wait_js_cond("%s(%s)" % (func, ','.join(map(jsquote, args))))
 
-    def is_present(self, selector: str) -> Optional[bool]:
+    def is_present(self, selector: str) -> bool:
         return self.call_js_func('ph_is_present', selector)
 
-    def _wait_present(self, selector: str):
+    def _wait_present(self, selector: str) -> None:
         self.wait_js_func('ph_is_present', selector)
 
-    def wait_not_present(self, selector: str):
+    def wait_not_present(self, selector: str) -> None:
         self.wait_js_func('!ph_is_present', selector)
 
-    def is_visible(self, selector: str) -> Optional[bool]:
+    def is_visible(self, selector: str) -> bool:
         return self.call_js_func('ph_is_visible', selector)
 
-    def wait_visible(self, selector: str):
+    def wait_visible(self, selector: str) -> None:
         self._wait_present(selector)
         self.wait_js_func('ph_is_visible', selector)
 
-    def wait_val(self, selector: str, val: str):
+    def wait_val(self, selector: str, val: object) -> None:
         self.wait_visible(selector)
         self.wait_js_func('ph_has_val', selector, val)
 
-    def wait_not_val(self, selector: str, val: str):
+    def wait_not_val(self, selector: str, val: str) -> None:
         self.wait_visible(selector)
         self.wait_js_func('!ph_has_val', selector, val)
 
-    def wait_attr(self, selector, attr, val):
+    def wait_attr(self, selector: str, attr: str, val: object) -> None:
         self._wait_present(selector)
         self.wait_js_func('ph_has_attr', selector, attr, val)
 
-    def wait_attr_contains(self, selector, attr, val):
+    def wait_attr_contains(self, selector: str, attr: str, val: str) -> None:
         self._wait_present(selector)
         self.wait_js_func('ph_attr_contains', selector, attr, val)
 
-    def wait_attr_not_contains(self, selector, attr, val):
+    def wait_attr_not_contains(self, selector: str, attr: str, val: object) -> None:
         self._wait_present(selector)
         self.wait_js_func('!ph_attr_contains', selector, attr, val)
 
-    def wait_not_attr(self, selector, attr, val):
+    def wait_not_attr(self, selector: str, attr: str, val: object) -> None:
         self._wait_present(selector)
         self.wait_js_func('!ph_has_attr', selector, attr, val)
 
-    def wait_not_visible(self, selector: str):
+    def wait_not_visible(self, selector: str) -> None:
         self.wait_js_func('!ph_is_visible', selector)
 
-    def wait_in_text(self, selector: str, text: str):
+    def wait_in_text(self, selector: str, text: str) -> None:
         self.wait_visible(selector)
         self.wait_js_cond("ph_in_text(%s,%s)" % (jsquote(selector), jsquote(text)),
                           error_description="() => 'actual text: ' + ph_text(%s)" % jsquote(selector))
 
-    def wait_not_in_text(self, selector: str, text: str):
+    def wait_not_in_text(self, selector: str, text: str) -> None:
         self.wait_visible(selector)
         self.wait_js_func('!ph_in_text', selector, text)
 
-    def wait_collected_text(self, selector: str, text: str):
+    def wait_collected_text(self, selector: str, text: str) -> None:
         self.wait_js_func('ph_collected_text_is', selector, text)
 
-    def wait_text(self, selector: str, text: str):
+    def wait_text(self, selector: str, text: str) -> None:
         self.wait_visible(selector)
         self.wait_js_cond("ph_text_is(%s,%s)" % (jsquote(selector), jsquote(text)),
                           error_description="() => 'actual text: ' + ph_text(%s)" % jsquote(selector))
 
-    def wait_text_not(self, selector: str, text: str):
+    def wait_text_not(self, selector: str, text: str) -> None:
         self.wait_visible(selector)
         self.wait_js_func('!ph_text_is', selector, text)
 
-    def wait_text_matches(self, selector: str, pattern: str):
+    def wait_text_matches(self, selector: str, pattern: str) -> None:
         self.wait_visible(selector)
         self.wait_js_func('ph_text_matches', selector, pattern)
 
-    def wait_popup(self, id: str):
+    def wait_popup(self, elem_id: str) -> None:
         """Wait for a popup to open.
 
         :param id: the 'id' attribute of the popup.
         """
-        self.wait_visible('#' + id)
+        self.wait_visible('#' + elem_id)
 
-    def wait_popdown(self, id: str):
-        """Wait for a popup to close.
-
-        :param id: the 'id' attribute of the popup.
-        """
-        self.wait_not_visible('#' + id)
-
-    def wait_language(self, lang: str):
+    def wait_language(self, lang: str) -> None:
         parts = lang.split("-")
         code_1 = parts[0]
         code_2 = parts[0]
@@ -693,28 +899,11 @@ class Browser:
             code_2 += "_" + parts[1].upper()
         self.wait_js_cond("cockpit.language == '%s' || cockpit.language == '%s'" % (code_1, code_2))
 
-    def dialog_complete(self, sel: str, button: str = ".pf-m-primary", result: str = "hide"):
-        self.click(sel + " " + button)
-        self.wait_not_present(sel + " .dialog-wait-ct")
-
-        dialog_visible = self.call_js_func('ph_is_visible', sel)
-        if result == "hide":
-            if dialog_visible:
-                raise AssertionError(sel + " dialog did not complete and close")
-        elif result == "fail":
-            if not dialog_visible:
-                raise AssertionError(sel + " dialog is closed no failures present")
-            dialog_error = self.call_js_func('ph_is_present', sel + " .dialog-error")
-            if not dialog_error:
-                raise AssertionError(sel + " dialog has no errors")
-        else:
-            raise Error("invalid dialog result argument: " + result)
-
-    def dialog_cancel(self, sel: str, button: str = "button[data-dismiss='modal']"):
+    def dialog_cancel(self, sel: str, button: str = "button[data-dismiss='modal']") -> None:
         self.click(sel + " " + button)
         self.wait_not_visible(sel)
 
-    def enter_page(self, path: str, host: Optional[str] = None, reconnect: bool = True):
+    def enter_page(self, path: str, host: str | None = None, reconnect: bool = True) -> None:
         """Wait for a page to become current.
 
         :param path: The identifier the page.  This is a string starting with "/"
@@ -733,10 +922,15 @@ class Browser:
 
         self.switch_to_top()
 
+        def wait_no_curtain() -> None:
+            # Older shells make the curtain invisible, newer shells
+            # remove it entirely. Let's cater to both.
+            self.wait_js_cond('!ph_is_present(".curtains-ct") || !ph_is_visible(".curtains-ct")')
+
         while True:
             try:
                 self._wait_present("iframe.container-frame[name='%s'][data-loaded]" % frame)
-                self.wait_not_visible(".curtains-ct")
+                wait_no_curtain()
                 self.wait_visible("iframe.container-frame[name='%s']" % frame)
                 break
             except Error as ex:
@@ -744,29 +938,24 @@ class Browser:
                     reconnect = False
                     if self.is_present("#machine-reconnect"):
                         self.click("#machine-reconnect")
-                        self.wait_not_visible(".curtains-ct")
+                        wait_no_curtain()
                         continue
                 raise
 
         self.switch_to_frame(frame)
-        self._wait_present("body")
         self.wait_visible("body")
 
-    def leave_page(self):
+    def leave_page(self) -> None:
         self.switch_to_top()
 
-    def wait_action_btn(self, sel: str, entry: str):
-        self.wait_text(sel + ' button:first-child', entry)
-
-    def click_action_btn(self, sel: str, entry: Optional[str] = None):
-        # We don't need to open the menu, it's enough to simulate a
-        # click on the invisible button.
-        if entry:
-            self.click(sel + ' a:contains("%s")' % entry)
-        else:
-            self.click(sel + ' button:first-child')
-
-    def try_login(self, user: Optional[str] = None, password: Optional[str] = None, superuser: Optional[bool] = True, legacy_authorized: Optional[bool] = None):
+    def try_login(
+        self,
+        user: str | None = None,
+        password: str | None = None,
+        *,
+        superuser: bool | None = True,
+        legacy_authorized: bool | None = None
+    ) -> None:
         """Fills in the login dialog and clicks the button.
 
         This differs from login_and_go() by not expecting any particular result.
@@ -795,9 +984,18 @@ class Browser:
             self.eval_js('window.localStorage.setItem("superuser:%s", "%s");' % (user, "any" if superuser else "none"))
         self.click('#login-button')
 
-    def login_and_go(self, path: Optional[str] = None, user: Optional[str] = None, host: Optional[str] = None,
-                     superuser: bool = True, urlroot: Optional[str] = None, tls: bool = False, password: Optional[str] = None,
-                     legacy_authorized: Optional[bool] = None):
+    def login_and_go(
+        self,
+        path: str | None = None,
+        *,
+        user: str | None = None,
+        host: str | None = None,
+        superuser: bool | None = True,
+        urlroot: str | None = None,
+        tls: bool = False,
+        password: str | None = None,
+        legacy_authorized: bool | None = None
+    ) -> None:
         """Fills in the login dialog, clicks the button and navigates to the given path
 
         :param user: the username to login with
@@ -820,47 +1018,48 @@ class Browser:
             href = "/@" + host + href
         self.open(href, tls=tls)
 
-        self.try_login(user, password, superuser=superuser, legacy_authorized=legacy_authorized)
+        self.try_login(user=user, password=password, superuser=superuser, legacy_authorized=legacy_authorized)
 
-        self._wait_present('#content')
         self.wait_visible('#content')
         if path:
             self.enter_page(path.split("#")[0], host=host)
 
-    def logout(self):
+    def logout(self) -> None:
         self.assert_no_oops()
-
         self.switch_to_top()
 
-        # changed in #16522
-        prev_shell = self.machine.system_before(258)
-
-        if prev_shell:
-            self.wait_visible("#navbar-dropdown")
-        else:
-            self.wait_visible("#toggle-menu")
+        self.wait_visible("#toggle-menu")
         if self.is_present("button#machine-reconnect") and self.is_visible("button#machine-reconnect"):
             # happens when shutting down cockpit or rebooting machine
             self.click("button#machine-reconnect")
         else:
             # happens when cockpit is still running
-            if prev_shell:
-                self.click("#navbar-dropdown")
-                self.click('#go-logout')
-            else:
-                self.open_session_menu()
-                self.click('#logout')
+            self.open_session_menu()
+            try:
+                # HACK: scrolling into view sometimes triggers TopNav's handleClickOutside() hack
+                # we don't need it here, if the session menu is visible then so is the dropdown
+                self.mouse('#logout', "click", scrollVisible=False)
+            except RuntimeError as e:
+                # logging out does destroy the current frame context, it races with the driver finishing the command
+                if "Execution context was destroyed" not in str(e):
+                    raise
         self.wait_visible('#login')
 
         self.machine.allow_restart_journal_messages()
 
-    def relogin(self, path: Optional[str] = None, user: Optional[str] = None, password: Optional[str] = None,
-                superuser: Optional[bool] = None, wait_remote_session_machine: Optional[testvm.Machine] = None):
+    def relogin(
+        self,
+        path: str | None = None,
+        user: str | None = None,
+        *,
+        password: str | None = None,
+        superuser: bool | None = None,
+        wait_remote_session_machine: testvm.Machine | None = None
+    ) -> None:
         self.logout()
         if wait_remote_session_machine:
-            wait_remote_session_machine.execute("while pgrep -a cockpit-ssh; do sleep 1; done")
-        self.try_login(user, password=password, superuser=superuser)
-        self._wait_present('#content')
+            wait_remote_session_machine.execute("while pgrep -af '[c]ockpit.beiboot'; do sleep 1; done")
+        self.try_login(user=user, password=password, superuser=superuser)
         self.wait_visible('#content')
         if path:
             if path.startswith("/@"):
@@ -869,22 +1068,24 @@ class Browser:
                 host = None
             self.enter_page(path.split("#")[0], host=host)
 
-    def open_session_menu(self):
+    def open_session_menu(self) -> None:
         self.wait_visible("#toggle-menu")
         if (self.attr("#toggle-menu", "aria-expanded") != "true"):
             self.click("#toggle-menu")
 
-    def layout_is_mobile(self):
-        return self.current_layout and self.current_layout["shell_size"][0] < 420
+    def layout_is_mobile(self) -> bool:
+        if not self.current_layout:
+            return False
+        return self.current_layout["shell_size"][0] < 420
 
-    def open_superuser_dialog(self):
+    def open_superuser_dialog(self) -> None:
         if self.layout_is_mobile():
             self.open_session_menu()
             self.click("#super-user-indicator-mobile button")
         else:
             self.click("#super-user-indicator button")
 
-    def check_superuser_indicator(self, expected: str):
+    def check_superuser_indicator(self, expected: str) -> None:
         if self.layout_is_mobile():
             self.open_session_menu()
             self.wait_text("#super-user-indicator-mobile", expected)
@@ -892,37 +1093,45 @@ class Browser:
         else:
             self.wait_text("#super-user-indicator", expected)
 
-    def become_superuser(self, user: Optional[str] = None, password: Optional[str] = None, passwordless: Optional[bool] = False):
-        cur_frame = self.cdp.cur_frame
-        self.switch_to_top()
+    def become_superuser(
+        self,
+        user: str | None = None,
+        password: str | None = None,
+        passwordless: bool | None = False
+    ) -> None:
+        with self.driver.restore_context():
+            self.switch_to_top()
+            self.open_superuser_dialog()
 
-        self.open_superuser_dialog()
+            # In (open)SUSE images, superuser access always requires the root password
+            if user is None:
+                user = "root" if "suse" in self.machine.image else "admin"
 
-        if passwordless:
-            self.wait_in_text(".pf-c-modal-box:contains('Administrative access')", "You now have administrative access.")
-            self.click(".pf-c-modal-box button:contains('Close')")
-            self.wait_not_present(".pf-c-modal-box:contains('You now have administrative access.')")
-        else:
-            self.wait_in_text(".pf-c-modal-box:contains('Switch to administrative access')", f"Password for {user or 'admin'}:")
-            self.set_input_text(".pf-c-modal-box:contains('Switch to administrative access') input", password or "foobar")
-            self.click(".pf-c-modal-box button:contains('Authenticate')")
-            self.wait_not_present(".pf-c-modal-box:contains('Switch to administrative access')")
+            if passwordless:
+                self.wait_in_text("div[role=dialog]", "Administrative access")
+                self.wait_in_text("div[role=dialog] .pf-v5-c-modal-box__body", "You now have administrative access.")
+                # there should be only one ("Close") button
+                self.click("div[role=dialog] .pf-v5-c-modal-box__footer button")
+            else:
+                self.wait_in_text("div[role=dialog]", "Switch to administrative access")
+                self.wait_in_text("div[role=dialog]", f"Password for {user}:")
+                self.set_input_text("div[role=dialog] input", password or "foobar")
+                self.click("div[role=dialog] button.pf-m-primary")
 
-        self.check_superuser_indicator("Administrative access")
-        self.switch_to_frame(cur_frame)
+            self.wait_not_present("div[role=dialog]")
 
-    def drop_superuser(self):
-        cur_frame = self.cdp.cur_frame
-        self.switch_to_top()
+            self.check_superuser_indicator("Administrative access")
 
-        self.open_superuser_dialog()
-        self.click(".pf-c-modal-box:contains('Switch to limited access') button:contains('Limit access')")
-        self.wait_not_present(".pf-c-modal-box:contains('Switch to limited access')")
-        self.check_superuser_indicator("Limited access")
+    def drop_superuser(self) -> None:
+        with self.driver.restore_context():
+            self.switch_to_top()
+            self.open_superuser_dialog()
+            self.wait_in_text("div[role=dialog]", "Switch to limited access")
+            self.click("div[role=dialog] button.pf-m-primary")
+            self.wait_not_present("div[role=dialog]")
+            self.check_superuser_indicator("Limited access")
 
-        self.switch_to_frame(cur_frame)
-
-    def click_system_menu(self, path: str, enter: bool = True):
+    def click_system_menu(self, path: str, enter: bool = True) -> None:
         """Click on a "System" menu entry with given URL path
 
         Enters the given target frame afterwards, unless enter=False is given
@@ -934,77 +1143,132 @@ class Browser:
             # strip off parameters after hash
             self.enter_page(path.split('#')[0].rstrip('/'))
 
-    def ignore_ssl_certificate_errors(self, ignore: bool):
-        action = ignore and "continue" or "cancel"
-        if opts.trace:
-            print("-> Setting SSL certificate error policy to %s" % action)
-        self.cdp.command(f"setSSLBadCertificateAction('{action}')")
+    def get_pf_progress_value(self, progress_bar_sel: str) -> int:
+        """Get numeric value of a PatternFly <ProgressBar> component"""
+        sel = progress_bar_sel + " .pf-v5-c-progress__indicator"
+        self.wait_visible(sel)
+        self.wait_attr_contains(sel, "style", "width:")
+        style = self.attr(sel, "style")
+        m = re.search(r"width: (\d+)%;", style)
+        assert m is not None
+        return int(m.group(1))
 
-    def grant_permissions(self, *args: str):
+    def start_machine_troubleshoot(
+        self,
+        new: bool = False,
+        known_host: bool = False,
+        password: str | None = None,
+        expect_closed_dialog: bool = True,
+        expect_warning: bool = True,
+        expect_curtain: bool = True
+    ) -> None:
+        if expect_curtain:
+            self.click('#machine-troubleshoot')
+
+        if not new and expect_warning:
+            self.wait_visible('#hosts_connect_server_dialog')
+            self.click("#hosts_connect_server_dialog button.pf-m-warning")
+
+        self.wait_visible('#hosts_setup_server_dialog')
+        if new:
+            self.wait_text("#hosts_setup_server_dialog button.pf-m-primary", "Add")
+            self.click("#hosts_setup_server_dialog button.pf-m-primary")
+            if expect_warning:
+                self.wait_visible('#hosts_connect_server_dialog')
+                self.click("#hosts_connect_server_dialog button.pf-m-warning")
+            if not known_host:
+                self.wait_in_text('#hosts_setup_server_dialog', "You are connecting to")
+                self.wait_in_text('#hosts_setup_server_dialog', "for the first time.")
+                self.wait_text("#hosts_setup_server_dialog button.pf-m-primary", "Trust and add host")
+                self.click("#hosts_setup_server_dialog button.pf-m-primary")
+        if password:
+            self.wait_in_text('#hosts_setup_server_dialog', "Unable to log in")
+            self.set_input_text('#login-custom-password', password)
+            self.wait_text("#hosts_setup_server_dialog button.pf-m-primary", "Log in")
+            self.click("#hosts_setup_server_dialog button.pf-m-primary")
+        if expect_closed_dialog:
+            self.wait_not_present('#hosts_setup_server_dialog')
+
+    def add_machine(self, address: str, known_host: bool = False, password: str | None = "foobar",
+                    expect_warning: bool = True) -> None:
+        self.switch_to_top()
+        self.go(f"/@{address}")
+        self.start_machine_troubleshoot(new=True,
+                                        known_host=known_host,
+                                        password=password,
+                                        expect_warning=expect_warning)
+        self.enter_page("/system", host=address)
+
+    def grant_permissions(self, *args: str) -> None:
         """Grant permissions to the browser"""
-        # https://chromedevtools.github.io/devtools-protocol/tot/Browser/#method-grantPermissions
-        self.cdp.invoke("Browser.grantPermissions",
-                        origin="http://%s:%s" % (self.address, self.port),
-                        permissions=args)
 
-    def snapshot(self, title: str, label: Optional[str] = None):
+        # BiDi permission extension:
+        # https://www.w3.org/TR/permissions/#automation-webdriver-bidi
+        for perm in args:
+            self.bidi("permissions.setPermission", descriptor={"name": perm}, state="granted",
+                      origin=f"http://{self.address}:{self.port}")
+
+    def snapshot(self, title: str, label: str | None = None) -> None:
         """Take a snapshot of the current screen and save it as a PNG and HTML.
 
         Arguments:
             title: Used for the filename.
         """
-        if self.cdp and self.cdp.valid:
-            self.cdp.command("clearExceptions()")
-
-            filename = "{0}-{1}.png".format(label or self.label, title)
-            if self.body_clip:
-                ret = self.cdp.invoke("Page.captureScreenshot", clip=self.body_clip, no_trace=True)
-            else:
-                ret = self.cdp.invoke("Page.captureScreenshot", no_trace=True)
-            if "data" in ret:
+        if self._is_running():
+            filename = unique_filename(f"{label or self.label}-{title}", "png")
+            try:
+                ret = self.bidi("browsingContext.captureScreenshot", quiet=True,
+                                context=self.driver.top_context, origin="document")
                 with open(filename, 'wb') as f:
                     f.write(base64.standard_b64decode(ret["data"]))
                 attach(filename, move=True)
                 print("Wrote screenshot to " + filename)
-            else:
-                print("Screenshot not available")
+            except Error as e:
+                print("Screenshot not available:", e)
 
-            filename = "{0}-{1}.html".format(label or self.label, title)
-            html = self.cdp.invoke("Runtime.evaluate", expression="document.documentElement.outerHTML",
-                                   no_trace=True)["result"]["value"]
-            with open(filename, 'wb') as f:
-                f.write(html.encode('UTF-8'))
-            attach(filename, move=True)
-            print("Wrote HTML dump to " + filename)
+            filename = unique_filename(f"{label or self.label}-{title}", "html")
+            try:
+                html = self.eval_js("document.documentElement.outerHTML", no_trace=True)
+                with open(filename, 'wb') as f:
+                    f.write(html.encode())
+                attach(filename, move=True)
+                print("Wrote HTML dump to " + filename)
+            except Error as e:
+                print("HTML dump not available:", e)
 
-    def _set_window_size(self, width: int, height: int):
-        self.cdp.invoke("Emulation.setDeviceMetricsOverride",
-                        width=width, height=height,
-                        deviceScaleFactor=0, mobile=False)
+    def _set_window_size(self, width: int, height: int) -> None:
+        self.bidi("browsingContext.setViewport", context=self.driver.top_context,
+                  viewport={"width": width, "height": height})
 
-    def _set_emulated_media_theme(self, name: str):
+    def _set_emulated_media_theme(self, name: str) -> None:
         # https://bugzilla.mozilla.org/show_bug.cgi?id=1549434
-        if self.cdp.browser.name == "chromium":
-            self.cdp.invoke("Emulation.setEmulatedMedia", features=[{'name': 'prefers-color-scheme', 'value': name}])
+        if self.browser == "chromium":
+            self.cdp_command("Emulation.setEmulatedMedia", features=[{'name': 'prefers-color-scheme', 'value': name}])
 
-    def _set_direction(self, direction: str):
-        cur_frame = self.cdp.cur_frame
-        if self.is_present("#shell-page"):
-            self.switch_to_top()
-            self.set_attr("#shell-page", "dir", direction)
-        self.switch_to_frame(cur_frame)
+    def _set_direction(self, direction: str) -> None:
+        with self.driver.restore_context():
+            if self.is_present("#shell-page"):
+                self.switch_to_top()
+                self.set_attr("#shell-page", "dir", direction)
         self.set_attr("html", "dir", direction)
 
-    def set_layout(self, name: str):
-        layout = [lo for lo in self.layouts if lo["name"] == name][0]
+    def set_layout(self, name: str) -> None:
+        layout = next(lo for lo in self.layouts if lo["name"] == name)
         if layout != self.current_layout:
+            if layout["name"] == "rtl":
+                self._set_direction("rtl")
+            elif layout["name"] != "rtl" and self.current_layout and self.current_layout["name"] == "rtl":
+                self._set_direction("ltr")
+
             self.current_layout = layout
             size = layout["shell_size"]
             self._set_window_size(size[0], size[1])
             self._adjust_window_for_fixed_content_size()
             self._set_emulated_media_theme(layout["theme"])
 
-    def _adjust_window_for_fixed_content_size(self):
+    def _adjust_window_for_fixed_content_size(self) -> None:
+        assert self.current_layout is not None
+
         if self.eval_js("window.name").startswith("cockpit1:"):
             # Adjust the window size further so that the content is
             # exactly the expected size.  This will make sure that
@@ -1020,15 +1284,24 @@ class Browser:
             if delta[0] != 0 or delta[1] != 0:
                 self._set_window_size(shell_size[0] + delta[0], shell_size[1] + delta[1])
 
-    def assert_pixels_in_current_layout(self, selector: str, key: str,
-                                        ignore: List[str] = [],
-                                        scroll_into_view: Optional[str] = None,
-                                        wait_animations: bool = True):
+    def assert_pixels_in_current_layout(
+        self,
+        selector: str,
+        key: str,
+        *,
+        ignore: Collection[str] = (),
+        mock: Mapping[str, str] | None = None,
+        sit_after_mock: bool = False,
+        scroll_into_view: str | None = None,
+        wait_animations: bool = True,
+        wait_delay: float = 0.5
+    ) -> None:
         """Compare the given element with its reference in the current layout"""
 
         if not (Image and self.pixels_label):
             return
 
+        assert self.current_layout is not None
         self._adjust_window_for_fixed_content_size()
         self.call_js_func('ph_scrollIntoViewIfNeeded', scroll_into_view or selector)
         self.call_js_func('ph_blur_active')
@@ -1054,29 +1327,39 @@ class Browser:
         # wait half a second to and side-step all that complexity.
 
         if wait_animations:
+            time.sleep(wait_delay)
             self.wait_js_cond('ph_count_animations(%s) == 0' % jsquote(selector))
+
+        if mock is not None:
+            self.set_mock(mock, base=selector)
+            if sit_after_mock:
+                sit()
 
         rect = self.call_js_func('ph_element_clip', selector)
 
-        def relative_clips(sels):
-            return list(map(lambda r: (r['x'] - rect['x'],
-                                       r['y'] - rect['y'],
-                                       r['x'] - rect['x'] + r['width'],
-                                       r['y'] - rect['y'] + r['height']),
-                            self.call_js_func('ph_selector_clips', sels)))
+        def relative_clips(sels: Collection[str]) -> Collection[tuple[int, int, int, int]]:
+            return [(
+                    r['x'] - rect['x'],
+                    r['y'] - rect['y'],
+                    r['x'] - rect['x'] + r['width'],
+                    r['y'] - rect['y'] + r['height'])
+                    for r in self.call_js_func('ph_selector_clips', sels)]
 
         reference_dir = os.path.join(TEST_DIR, 'reference')
         if not os.path.exists(os.path.join(reference_dir, '.git')):
             raise SystemError("Pixel test references are missing, please run: test/common/pixel-tests pull")
 
-        ignore_rects = relative_clips(list(map(lambda item: selector + " " + item, ignore)))
+        ignore_rects = relative_clips([f"{selector} {item}" for item in ignore])
         base = self.pixels_label + "-" + key
         if self.current_layout != self.layouts[0]:
             base += "-" + self.current_layout["name"]
         filename = base + "-pixels.png"
         ref_filename = os.path.join(reference_dir, filename)
         self.used_pixel_references.add(ref_filename)
-        ret = self.cdp.invoke("Page.captureScreenshot", clip=rect, no_trace=True)
+        rect["type"] = "box"
+        ret = self.bidi("browsingContext.captureScreenshot", quiet=True,
+                        context=self.driver.top_context,
+                        clip=rect)
         png_now = base64.standard_b64decode(ret["data"])
         png_ref = os.path.exists(ref_filename) and open(ref_filename, "rb").read()
         if not png_ref:
@@ -1088,7 +1371,9 @@ class Browser:
         else:
             img_now = Image.open(io.BytesIO(png_now)).convert("RGBA")
             img_ref = Image.open(io.BytesIO(png_ref)).convert("RGBA")
-            img_delta = img_ref.copy()
+            img_delta = Image.new("RGBA",
+                                  (max(img_now.size[0], img_ref.size[0]), max(img_now.size[1], img_ref.size[1])),
+                                  (255, 0, 0, 255))
 
             # The current snapshot and the reference don't need to
             # be perfectly identical.  They might differ in the
@@ -1105,44 +1390,62 @@ class Browser:
             #
             # - The RGB values of pixels can differ by up to 2.
             #
-            # - There can be up to 5 different pixels
+            # - There can be up to 20 different pixels
             #
             # Pixels that are different but have been ignored are
             # marked in the delta image in green.
 
-            def masked(ref):
+            def masked(ref: tuple[int, ...]) -> bool:
                 return ref[3] != 255
 
-            def ignorable_coord(x, y):
+            def ignorable_coord(x: int, y: int) -> bool:
                 for (x0, y0, x1, y1) in ignore_rects:
                     if x >= x0 - 2 and x < x1 + 2 and y >= y0 - 2 and y < y1 + 2:
                         return True
                 return False
 
-            def ignorable_change(a, b):
-                return abs(a[0] - b[0]) <= 2 and abs(a[1] - b[1]) <= 2 and abs(a[1] - b[1]) <= 2
+            def ignorable_change(a: tuple[int, ...], b: tuple[int, ...]) -> bool:
+                return abs(a[0] - b[0]) <= 2 and abs(a[1] - b[1]) <= 2 and abs(a[2] - b[2]) <= 2
 
-            def img_eq(ref, now, delta):
+            def img_eq(ref: Image.Image, now: Image.Image, delta: Image.Image) -> bool:
                 # This is slow but exactly what we want.
                 # ImageMath might be able to speed this up.
-                if ref.size != now.size:
-                    return False
+                # no-untyped-call: see https://github.com/python-pillow/Pillow/issues/8029
                 data_ref = ref.load()
                 data_now = now.load()
                 data_delta = delta.load()
+                assert data_ref
+                assert data_now
+                assert data_delta
                 result = True
                 count = 0
-                width, height = ref.size
+                width, height = delta.size
                 for y in range(height):
                     for x in range(width):
-                        if data_ref[x, y] != data_now[x, y]:
-                            if masked(data_ref[x, y]) or ignorable_coord(x, y) or ignorable_change(data_ref[x, y], data_now[x, y]):
-                                data_delta[x, y] = (0, 255, 0, 255)
+                        if x >= ref.size[0] or x >= now.size[0] or y >= ref.size[1] or y >= now.size[1]:
+                            result = False
+                        else:
+                            # we only support RGBA
+                            ref_pixel = data_ref[x, y]
+                            now_pixel = data_now[x, y]
+                            # we only support RGBA, not single-channel float (grayscale)
+                            assert isinstance(ref_pixel, tuple)
+                            assert isinstance(now_pixel, tuple)
+
+                            if ref_pixel != now_pixel:
+                                if (
+                                        masked(ref_pixel) or
+                                        ignorable_coord(x, y) or
+                                        ignorable_change(ref_pixel, now_pixel)
+                                ):
+                                    data_delta[x, y] = (0, 255, 0, 255)
+                                else:
+                                    data_delta[x, y] = (255, 0, 0, 255)
+                                    count += 1
+                                    if count > 20:
+                                        result = False
                             else:
-                                data_delta[x, y] = (255, 0, 0, 255)
-                                count += 1
-                                if count > 5:
-                                    result = False
+                                data_delta[x, y] = ref_pixel
                 return result
 
             if not img_eq(img_ref, img_now, img_delta):
@@ -1162,179 +1465,157 @@ class Browser:
                 print("Differences in pixel test " + base)
                 self.failed_pixel_tests += 1
 
-    def assert_pixels(self, selector: str, key: str,
-                      ignore: List[str] = [],
-                      skip_layouts: List[str] = [],
-                      scroll_into_view: Optional[str] = None,
-                      wait_animations: bool = True,
-                      wait_delay: float = 0.5):
+    def assert_pixels(
+        self,
+        selector: str,
+        key: str,
+        *,
+        ignore: Collection[str] = (),
+        mock: Mapping[str, str] | None = None,
+        sit_after_mock: bool = False,
+        skip_layouts: Container[str] = (),
+        scroll_into_view: str | None = None,
+        wait_animations: bool = True,
+        wait_after_layout_change: bool = False,
+        wait_delay: float = 0.5
+    ) -> None:
         """Compare the given element with its reference in all layouts"""
+
+        if ignore is None:
+            ignore = []
 
         if not (Image and self.pixels_label):
             return
+
+        # If the page overflows make sure to not show a scrollbar
+        # Don't apply this hack for login and terminal and shell as they don't use PF Page
+        if not self.is_present("#shell-page") and not self.is_present("#login-details") and not self.is_present("#system-terminal-page"):
+            classes = self.attr("main", "class")
+            if "pf-v5-c-page__main" in classes:
+                self.set_attr("main.pf-v5-c-page__main", "class", f"{classes} pixel-test")
+
+        # move the mouse to a harmless place where it doesn't accidentally focus anything (as that changes UI)
+        self.bidi("input.performActions", context=self.driver.context, actions=[{
+            "id": "move-away",
+            "type": "pointer",
+            "parameters": {"pointerType": "mouse"},
+            "actions": [{"type": "pointerMove", "x": 2000, "y": 0, "origin": "viewport"}]
+        }])
 
         if self.current_layout:
             previous_layout = self.current_layout["name"]
             for layout in self.layouts:
                 if layout["name"] not in skip_layouts:
                     self.set_layout(layout["name"])
-                    time.sleep(wait_delay)
-                    if "rtl" in self.current_layout["name"]:
-                        self._set_direction("rtl")
+                    if wait_after_layout_change:
+                        time.sleep(wait_delay)
                     self.assert_pixels_in_current_layout(selector, key, ignore=ignore,
+                                                         mock=mock, sit_after_mock=sit_after_mock,
                                                          scroll_into_view=scroll_into_view,
-                                                         wait_animations=wait_animations)
+                                                         wait_animations=wait_animations,
+                                                         wait_delay=wait_delay)
 
-                    if "rtl" in self.current_layout["name"]:
-                        self._set_direction("ltr")
             self.set_layout(previous_layout)
 
-    def assert_no_unused_pixel_test_references(self):
+    def assert_no_unused_pixel_test_references(self) -> None:
         """Check whether all reference images in test/reference have been used."""
 
         if not (Image and self.pixels_label):
             return
 
-        all = set(glob.glob(os.path.join(TEST_DIR, "reference", self.pixels_label + "*-pixels.png")))
-        unused = all - self.used_pixel_references
+        pixel_references = set(glob.glob(os.path.join(TEST_DIR, "reference", self.pixels_label + "*-pixels.png")))
+        unused = pixel_references - self.used_pixel_references
         for u in unused:
             print("Unused reference image " + os.path.basename(u))
             self.failed_pixel_tests += 1
 
-    def get_js_log(self):
+    def get_js_log(self) -> Sequence[str]:
         """Return the current javascript log"""
 
-        if self.cdp:
-            return self.cdp.get_js_log()
+        if self._is_running():
+            return [str(log) for log in self.driver.logs]
         return []
 
-    def copy_js_log(self, title: str, label: Optional[str] = None):
+    def copy_js_log(self, title: str, label: str | None = None) -> None:
         """Copy the current javascript log"""
 
-        logs = list(self.get_js_log())
+        logs = self.get_js_log()
         if logs:
-            filename = "{0}-{1}.js.log".format(label or self.label, title)
+            filename = unique_filename(f"{label or self.label}-{title}", "js.log")
             with open(filename, 'wb') as f:
-                f.write('\n'.join(logs).encode('UTF-8'))
+                f.write('\n'.join(logs).encode())
             attach(filename, move=True)
             print("Wrote JS log to " + filename)
 
-    def kill(self):
-        self.cdp.kill()
-
-    def write_coverage_data(self):
-        if self.coverage_label and self.cdp and self.cdp.valid:
-            coverage = self.cdp.invoke("Profiler.takePreciseCoverage")
+    def write_coverage_data(self) -> None:
+        if self.coverage_label and self._is_running():
+            coverage = self.cdp_command("Profiler.takePreciseCoverage")["result"]
             write_lcov(coverage['result'], self.coverage_label)
 
-    def assert_no_oops(self):
+    def assert_no_oops(self) -> None:
         if self.allow_oops:
             return
 
-        if self.cdp and self.cdp.valid:
+        if self.have_test_api():
             self.switch_to_top()
-            if self.is_present("#navbar-oops"):
+            if self.eval_js("!!document.getElementById('navbar-oops')"):
                 assert not self.is_visible("#navbar-oops"), "Cockpit shows an Oops"
-
-
-class _DebugOutcome(unittest.case._Outcome):  # type: ignore
-    """Run debug actions after test methods
-
-    This will do screenshots, HTML dumps, and sitting before cleanup handlers run.
-    """
-
-    def testPartExecutor(self, test_case, isTest=False):
-        def failureHandler(exc_info, python_311=False):
-            if python_311:
-                # exc_info is now a string
-                print(exc_info, file=sys.stderr)
-            else:
-                # strip off the two topmost frames for testPartExecutor and TestCase.run(); uninteresting and breaks naughties
-                traceback.print_exception(exc_info[0], exc_info[1], exc_info[2].tb_next.tb_next)
-            try:
-                test_case.snapshot("FAIL")
-                test_case.copy_js_log("FAIL")
-                test_case.copy_journal("FAIL")
-                test_case.copy_cores("FAIL")
-            except (OSError, RuntimeError):
-                # failures in these debug artifacts should not skip cleanup actions
-                sys.stderr.write("Failed to generate debug artifact:\n")
-                traceback.print_exc(file=sys.stderr)
-
-            if opts.sit:
-                sit(test_case.machines)
-
-        superResult = super().testPartExecutor(test_case, isTest)
-        ran_debug = hasattr(test_case, "_ran_debug")
-
-        if ran_debug or not isinstance(test_case, MachineCase):
-            return superResult
-
-        # Python < 3.11 (Outcome class does not have a errors attribute anymore
-        # https://github.com/python/cpython/commit/664448d81f41c5fa971d8523a71b0f19e76cc136#diff-c6fe1ffe930def48a6adf1fa99b974737bac586fdacccacd1474e7b2f11370ebL79
-        if hasattr(self, 'errors'):
-            if self.errors and not isTest:
-                (err_case, exc_info) = self.errors[-1]
-                if exc_info:
-                    assert err_case == test_case
-                    setattr(test_case, "_ran_debug", True)
-                    failureHandler(exc_info, False)
-        elif self.result.errors or self.result.failures:
-            errors = [err for err in itertools.chain(self.result.errors, self.result.failures) if err[0] == test_case]
-            if errors:
-                (err_case, exc_info) = errors[-1]
-                setattr(test_case, "_ran_debug", True)
-                failureHandler(exc_info, True)
-
-        return superResult
-
-
-unittest.case._Outcome = _DebugOutcome  # type: ignore
 
 
 class MachineCase(unittest.TestCase):
     image = testvm.DEFAULT_IMAGE
-    libexecdir = None
+    libexecdir: str | None = None
+    sshd_socket: str | None = None
     runner = None
     machine: testvm.Machine
-    machines = Dict[str, testvm.Machine]
-    machine_class = None
+    machines: Mapping[str, testvm.Machine]
+    machine_class: type | None = None
     browser: Browser
     network = None
-    journal_start = None
+    journal_start: str | None = None
 
     # provision is a dictionary of dictionaries, one for each additional machine to be created, e.g.:
     # provision = { 'openshift' : { 'image': 'openshift', 'memory_mb': 1024 } }
     # These will be instantiated during setUp, and replaced with machine objects
-    provision: Optional[Dict[str, Dict[str, Union[str, int]]]] = None
+    provision: ClassVar[Mapping[str, Mapping[str, Any]] | None] = None
 
     global_machine = None
 
     @classmethod
-    def get_global_machine(cls):
+    def get_global_machine(cls) -> testvm.Machine:
         if cls.global_machine:
             return cls.global_machine
-        cls.global_machine = cls.new_machine(cls, restrict=True, cleanup=False)
+        cls.global_machine = cls().new_machine(restrict=True, cleanup=False)
         if opts.trace:
-            print("Starting global machine {0}".format(cls.global_machine.label))
+            print(f"Starting global machine {cls.global_machine.label}")
         cls.global_machine.start()
         return cls.global_machine
 
     @classmethod
-    def kill_global_machine(cls):
+    def kill_global_machine(cls) -> None:
         if cls.global_machine:
             cls.global_machine.kill()
+            cls.global_machine = None
 
-    def label(self):
-        (unused, sep, label) = self.id().partition(".")
-        return label.replace(".", "-")
+    def label(self) -> str:
+        return self.__class__.__name__ + '-' + self._testMethodName
 
-    def new_machine(self, image=None, forward={}, restrict=True, cleanup=True, **kwargs):
-        machine_class = self.machine_class
+    def new_machine(
+        self,
+        image: str | None = None,
+        forward: Mapping[str, int] | None = None,
+        restrict: bool = True,
+        cleanup: bool = True,
+        inherit_machine_class: bool = True,
+        **kwargs: Any
+    ) -> testvm.Machine:
+        machine_class = (inherit_machine_class and self.machine_class) or testvm.VirtMachine
+
         if opts.address:
             if forward:
                 raise unittest.SkipTest("Cannot run this test when specific machine address is specified")
-            machine = testvm.Machine(address=opts.address, image=image or self.image, verbose=opts.trace, browser=opts.browser)
+            machine = testvm.Machine(address=opts.address, image=image or self.image,
+                                     verbose=opts.trace, browser=opts.browser)
             if cleanup:
                 self.addCleanup(machine.disconnect)
         else:
@@ -1342,22 +1623,21 @@ class MachineCase(unittest.TestCase):
                 image = os.path.join(TEST_DIR, "images", self.image)
                 if not os.path.exists(image):
                     raise FileNotFoundError("Can't run tests without a prepared image; use test/image-prepare")
-            if not machine_class:
-                machine_class = testvm.VirtMachine
             if not self.network:
                 network = testvm.VirtNetwork(image=image)
                 if cleanup:
                     self.addCleanup(network.kill)
                 self.network = network
-            networking = self.network.host(restrict=restrict, forward=forward)
+            networking = self.network.host(restrict=restrict, forward=forward or {})
             machine = machine_class(verbose=opts.trace, networking=networking, image=image, **kwargs)
-            if opts.fetch and not os.path.exists(machine.image_file):
-                machine.pull(machine.image_file)
+            image_file = machine.image_file  # type: ignore[attr-defined]
+            if opts.fetch and not os.path.exists(image_file):
+                machine.pull(image_file)
             if cleanup:
                 self.addCleanup(machine.kill)
         return machine
 
-    def new_browser(self, machine=None, coverage=False):
+    def new_browser(self, machine: testvm.Machine | None = None, coverage: bool = False) -> Browser:
         if machine is None:
             machine = self.machine
         label = self.label() + "-" + machine.label
@@ -1373,48 +1653,54 @@ class MachineCase(unittest.TestCase):
             else:
                 if machine.image == reference_image:
                     pixels_label = self.label()
-        # HACK: until @todoPybridge disappears from all pixel tests
-        if os.environ.get("TEST_SCENARIO") == "pybridge":
-            pixels_label = None
         browser = Browser(machine.web_address,
                           label=label, pixels_label=pixels_label, coverage_label=self.label() if coverage else None,
                           port=machine.web_port, machine=self)
         self.addCleanup(browser.kill)
         return browser
 
-    def checkSuccess(self):
+    def getError(self) -> str | None:
         # errors is a list of (method, exception) calls (usually multiple
         # per method); None exception means success
         errors = []
+        assert hasattr(self, '_outcome')
         if hasattr(self._outcome, 'errors'):
+            assert hasattr(self, '_feedErrorsToResult')
             # Python 3.4 - 3.10  (These two methods have no side effects)
             result = self.defaultTestResult()
             errors = result.errors
             self._feedErrorsToResult(result, self._outcome.errors)
+        elif hasattr(self._outcome, 'result') and hasattr(self._outcome.result, '_excinfo'):
+            # pytest emulating unittest
+            assert isinstance(self._outcome.result._excinfo, str)
+            return self._outcome.result._excinfo
         else:
             # Python 3.11+ now records errors and failures seperate
             errors = self._outcome.result.errors + self._outcome.result.failures
 
-        return not any(e[1] for e in errors)
+        try:
+            return errors[0][1]
+        except IndexError:
+            return None
 
-    def is_nondestructive(self):
+    def is_nondestructive(self) -> bool:
         test_method = getattr(self.__class__, self._testMethodName)
         return get_decorator(test_method, self.__class__, "nondestructive")
 
-    def is_devel_build(self):
+    def is_devel_build(self) -> bool:
         return os.environ.get('NODE_ENV') == 'development'
 
-    def disable_preload(self, *packages, machine=None):
+    def disable_preload(self, *packages: str, machine: testvm.Machine | None = None) -> None:
         if machine is None:
             machine = self.machine
         for pkg in packages:
             machine.write(f"/etc/cockpit/{pkg}.override.json", '{ "preload": [ ] }')
 
-    def enable_preload(self, package, *pages):
+    def enable_preload(self, package: str, *pages: str) -> None:
         pages_str = ', '.join(f'"{page}"' for page in pages)
         self.machine.write(f"/etc/cockpit/{package}.override.json", f'{{ "preload": [ {pages_str} ] }}')
 
-    def system_before(self, version):
+    def system_before(self, version: int) -> bool:
         try:
             v = self.machine.execute("""rpm -q --qf '%{V}' cockpit-system ||
                                         dpkg-query -W -f '${source:Upstream-Version}' cockpit-system ||
@@ -1425,7 +1711,7 @@ class MachineCase(unittest.TestCase):
 
         return int(v[0]) < version
 
-    def setUp(self, restrict=True):
+    def setUp(self, restrict: bool = True) -> None:
         self.allowed_messages = self.default_allowed_messages
         self.allowed_console_errors = self.default_allowed_console_errors
         self.allow_core_dumps = False
@@ -1460,16 +1746,14 @@ class MachineCase(unittest.TestCase):
                 raise unittest.SkipTest("Cannot provision machines if test is marked as nondestructive")
             self.machine = self.machines['machine1'] = MachineCase.get_global_machine()
         else:
+            MachineCase.kill_global_machine()
             first_machine = True
             # First create all machines, wait for them later
             for key in sorted(provision.keys()):
-                options = provision[key].copy()
-                if 'address' in options:
-                    del options['address']
-                if 'dns' in options:
-                    del options['dns']
-                if 'dhcp' in options:
-                    del options['dhcp']
+                options = dict(provision[key])
+                options.pop('address', None)
+                options.pop('dns', None)
+                options.pop('dhcp', None)
                 if 'restrict' not in options:
                     options['restrict'] = restrict
                 machine = self.new_machine(**options)
@@ -1478,7 +1762,7 @@ class MachineCase(unittest.TestCase):
                     first_machine = False
                     self.machine = machine
                 if opts.trace:
-                    print("Starting {0} {1}".format(key, machine.label))
+                    print(f"Starting {key} {machine.label}")
                 machine.start()
 
         self.danger_btn_class = '.pf-m-danger'
@@ -1499,10 +1783,11 @@ class MachineCase(unittest.TestCase):
             if dhcp:
                 machine.dhcp_server()
 
-        self.journal_start = self.machine.journal_cursor()
-        self.browser: Browser = self.new_browser(coverage=opts.coverage)
+        m = self.machine
+        self.journal_start = m.journal_cursor()
+        self.browser = self.new_browser(coverage=opts.coverage)
         # fail tests on criticals
-        self.machine.write("/etc/cockpit/cockpit.conf", "[Log]\nFatal = criticals\n")
+        m.write("/etc/cockpit/cockpit.conf", "[Log]\nFatal = criticals\n")
         if self.is_nondestructive():
             self.nonDestructiveSetup()
 
@@ -1511,12 +1796,33 @@ class MachineCase(unittest.TestCase):
         if self.is_devel_build():
             self.disable_preload("packagekit", "systemd")
 
-        if self.machine.image.startswith('debian') or self.machine.image.startswith('ubuntu') or self.machine.image == 'arch':
+        image = m.image
+
+        if image.startswith(('debian', 'ubuntu')) or image == 'arch':
             self.libexecdir = '/usr/lib/cockpit'
         else:
             self.libexecdir = '/usr/libexec'
 
-    def nonDestructiveSetup(self):
+        if image.startswith(('debian', 'ubuntu')):
+            self.sshd_service = 'ssh.service'
+            self.sshd_socket = 'ssh.socket'
+        else:
+            self.sshd_service = 'sshd.service'
+            if image == 'arch':
+                self.sshd_socket = None
+            else:
+                self.sshd_socket = 'sshd.socket'
+        self.restart_sshd = f'systemctl try-restart {self.sshd_service}'
+
+        # only enabled by default on released OSes; see pkg/shell/manifest.json
+        self.multihost_enabled = image.startswith(("rhel-9", "centos-9")) or image in [
+                "ubuntu-2204", "ubuntu-2404", "debian-stable",
+                "fedora-39", "fedora-40"]
+        # Transitional code while we move ubuntu-stable from 24.04 to 24.10
+        if image == "ubuntu-stable" and m.execute(". /etc/os-release; echo $VERSION_ID").strip() == "24.04":
+            self.multihost_enabled = True
+
+    def nonDestructiveSetup(self) -> None:
         """generic setUp/tearDown for @nondestructive tests"""
 
         m = self.machine
@@ -1530,7 +1836,11 @@ class MachineCase(unittest.TestCase):
         self.addCleanup(m.execute, "find /var/lib/systemd/coredump -type f -delete")
 
         # temporary directory in the VM
-        self.addCleanup(m.execute, "if [ -d {0} ]; then findmnt --list --noheadings --output TARGET | grep ^{0} | xargs -r umount; rm -r {0}; fi".format(self.vm_tmpdir))
+        self.addCleanup(m.execute, f"""
+            if [ -d {self.vm_tmpdir} ]; then
+                findmnt --list --noheadings --output TARGET | grep ^{self.vm_tmpdir} | xargs -r umount
+                rm -r {self.vm_tmpdir}
+            fi""")
 
         # users/groups/home dirs
         self.restore_file("/etc/passwd")
@@ -1540,11 +1850,15 @@ class MachineCase(unittest.TestCase):
         self.restore_file("/etc/subuid")
         self.restore_file("/etc/subgid")
         self.restore_file("/var/log/wtmp")
-        home_dirs = m.execute("ls /home").strip().split()
 
-        def cleanup_home_dirs():
-            for d in m.execute("ls /home").strip().split():
-                if d not in home_dirs:
+        def get_home_dirs() -> Sequence[str]:
+            return m.execute("if [ -d /home ]; then ls /home; fi").strip().split()
+
+        initial_home_dirs = get_home_dirs()
+
+        def cleanup_home_dirs() -> None:
+            for d in get_home_dirs():
+                if d not in initial_home_dirs:
                     m.execute("rm -r /home/" + d)
         self.addCleanup(cleanup_home_dirs)
 
@@ -1553,15 +1867,16 @@ class MachineCase(unittest.TestCase):
             self.addCleanup(m.execute, "rm -rf /run/faillock")
 
         # cockpit configuration
-        self.addCleanup(m.execute, "rm -f /etc/cockpit/cockpit.conf /etc/cockpit/machines.d/* /etc/cockpit/*.override.json")
+        self.restore_dir("/etc/cockpit")
 
         if not m.ostree_image:
             # for storage tests
             self.restore_file("/etc/fstab")
             self.restore_file("/etc/crypttab")
 
-            # tests expect cockpit.service to not run at start; also, avoid log leakage into the next test
-            self.addCleanup(m.execute, "systemctl stop --quiet cockpit")
+            if not m.ws_container:
+                # tests expect cockpit.service to not run at start; also, avoid log leakage into the next test
+                self.addCleanup(m.execute, "systemctl stop --quiet cockpit")
 
         # The sssd daemon seems to get confused when we restore
         # backups of /etc/group etc and stops following updates to it.
@@ -1576,70 +1891,118 @@ class MachineCase(unittest.TestCase):
                         "for dev in $(ls /sys/bus/pseudo/drivers/scsi_debug/adapter*/host*/target*/*:*/block); do "
                         "    for s in /sys/block/*/slaves/${dev}*; do [ -e $s ] || break; "
                         "        d=/dev/$(dirname $(dirname ${s#/sys/block/})); "
+                        "        while fuser --mount $d --kill; do sleep 0.1; done; "
                         "        umount $d || true; dmsetup remove --force $d || true; "
                         "    done; "
-                        "    umount /dev/$dev 2>/dev/null || true; "
-                        "done; until rmmod scsi_debug; do sleep 1; done")
+                        "    while fuser --mount /dev/$dev --kill; do sleep 0.1; done; "
+                        "    umount /dev/$dev || true; "
+                        "    swapon --show=NAME --noheadings | grep $dev | xargs -r swapoff; "
+                        "done; until rmmod scsi_debug; do sleep 0.2; done", stdout=None)
 
-        def terminate_sessions():
-            # on OSTree we don't get "web console" sessions with the cockpit/ws container; just SSH; but also, some tests start
-            # admin sessions without Cockpit
-            self.machine.execute("""for u in $(loginctl --no-legend list-users  | awk '{ if ($2 != "root") print $1 }'); do
-                                        loginctl terminate-user $u 2>/dev/null || true
-                                        loginctl kill-user $u 2>/dev/null || true
-                                        pkill -9 -u $u || true
-                                        while pgrep -u $u; do sleep 1; done
-                                        while mountpoint -q /run/user/$u && ! umount /run/user/$u; do sleep 1; done
-                                        rm -rf /run/user/$u
-                                    done""")
+    def _terminate_sessions(self) -> None:
+        m = self.machine
 
-            # Terminate all other Cockpit sessions
-            sessions = self.machine.execute("loginctl --no-legend list-sessions | awk '/web console/ { print $1 }'").strip().split()
-            for s in sessions:
-                # Don't insist that terminating works, the session might be gone by now.
-                self.machine.execute(f"loginctl kill-session {s} || true; loginctl terminate-session {s} || true")
+        # on OSTree we don't get "web console" sessions with the cockpit/ws container; just SSH; but also, some tests start
+        # admin sessions without Cockpit
+        m.execute("""for u in $(loginctl --no-legend list-users  | awk '{ if ($2 != "root") print $1 }'); do
+                         loginctl terminate-user $u 2>/dev/null || true
+                         loginctl kill-user $u 2>/dev/null || true
+                         pkill -9 -u $u || true
+                         while pgrep -u $u; do sleep 0.2; done
+                         while mountpoint -q /run/user/$u && ! umount /run/user/$u; do sleep 0.2; done
+                         rm -rf /run/user/$u
+                     done""")
 
-            # Restart logind to mop up empty "closing" sessions
-            self.machine.execute("systemctl restart systemd-logind")
+        # Terminate all other Cockpit sessions
+        sessions = m.execute("loginctl --no-legend list-sessions | awk '/web console/ { print $1 }'").strip().split()
+        for s in sessions:
+            # Don't insist that terminating works, the session might be gone by now.
+            m.execute(f"loginctl kill-session {s} || true; loginctl terminate-session {s} || true")
 
-            # Wait for sessions to be gone
-            sessions = self.machine.execute("loginctl --no-legend list-sessions | awk '/web console/ { print $1 }'").strip().split()
-            for s in sessions:
-                try:
-                    m.execute(f"while loginctl show-session {s}; do sleep 1; done", timeout=30)
-                except RuntimeError:
-                    # show the status in debug logs, to see what's wrong
-                    m.execute(f"loginctl session-status {s} >&2")
-                    raise
+        # Restart logind to mop up empty "closing" sessions; https://github.com/systemd/systemd/issues/26744
+        m.execute("systemctl stop systemd-logind")
 
-            # terminate all systemd user services for users who are not logged in
-            self.machine.execute("systemctl stop user@*.service")
+        # Wait for sessions to be gone
+        sessions = m.execute("loginctl --no-legend list-sessions | awk '/web console/ { print $1 }'").strip().split()
+        for s in sessions:
+            try:
+                m.execute(f"while loginctl show-session {s}; do sleep 0.2; done", timeout=30)
+            except RuntimeError:
+                # show the status in debug logs, to see what's wrong
+                m.execute(f"loginctl session-status {s}; systemd-cgls", stdout=None)
+                raise
 
-        self.addCleanup(terminate_sessions)
+        # terminate all systemd user services for users who are not logged in
+        # since systemd 256 we stop user@*.service now also stops the root session (uid 0)
+        m.execute("cd /run/systemd/users/; "
+                  "for f in $(ls); do [ $f -le 500 ] || systemctl stop user@$f; done")
 
-    def tearDown(self):
+        # Clean up "closing" sessions again, and clean user id cache for non-system users
+        m.execute("systemctl stop systemd-logind; cd /run/systemd/users/; "
+                  "for f in $(ls); do [ $f -le 500 ] || rm $f; done")
+
+    def tearDown(self) -> None:
+        error = self.getError()
+
+        if error:
+            print(error, file=sys.stderr)
+            try:
+                self.snapshot("FAIL")
+                self.copy_js_log("FAIL")
+                self.copy_journal("FAIL")
+                self.copy_cores("FAIL")
+            except (OSError, RuntimeError):
+                # failures in these debug artifacts should not skip cleanup actions
+                sys.stderr.write("Failed to generate debug artifact:\n")
+                traceback.print_exc(file=sys.stderr)
+
+            if opts.sit:
+                sit(self.machines)
+
         if self.browser:
             self.browser.write_coverage_data()
+
         if self.machine.ssh_reachable:
             self.check_journal_messages()
-            if self.checkSuccess():
+            if not error:
                 self.check_browser_errors()
                 self.check_pixel_tests()
+
+        if self.is_nondestructive():
+            self._terminate_sessions()
+
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def login_and_go(self, path=None, user=None, host=None, superuser=True, urlroot=None, tls=False, enable_root_login=False):
+    def enable_multihost(self, machine: testvm.Machine) -> None:
+        if isBeibootLogin():
+            raise NotImplementedError("multi-host config change not currently implemented for beiboot scenario")
+        if not self.multihost_enabled:
+            machine.write("/etc/cockpit/cockpit.conf",
+                          '[WebService]\nAllowMultiHost=yes\n')
+            machine.restart_cockpit()
+
+    def login_and_go(
+        self,
+        path: str | None = None,
+        *,
+        user: str | None = None,
+        password: str | None = None,
+        host: str | None = None,
+        superuser: bool = True,
+        urlroot: str | None = None,
+        tls: bool = False,
+        enable_root_login: bool = False
+    ) -> None:
         if enable_root_login:
             self.enable_root_login()
         self.machine.start_cockpit(tls=tls)
         # first load after starting cockpit tends to take longer, due to on-demand service start
         with self.browser.wait_timeout(30):
-            self.browser.login_and_go(path, user=user, host=host, superuser=superuser, urlroot=urlroot, tls=tls)
+            self.browser.login_and_go(path, user=user, password=password, host=host, superuser=superuser,
+                                      urlroot=urlroot, tls=tls)
 
     # List of allowed journal messages during tests; these need to match the *entire* message
     default_allowed_messages = [
-        # This is a failed login, which happens every time
-        "Returning error-response 401 with reason `Sorry'",
-
         # Reauth stuff
         '.*Reauthorizing unix-user:.*',
         '.*user .* was reauthorized.*',
@@ -1662,6 +2025,7 @@ class MachineCase(unittest.TestCase):
 
         # btmp tracking
         "cockpit-session: pam: Last failed login:.*",
+        "cockpit-session: pam: Last login: .*",
         "cockpit-session: pam: There .* failed login attempts? since the last successful login.",
 
         # pam_lastlog complaints
@@ -1676,6 +2040,7 @@ class MachineCase(unittest.TestCase):
         # SELinux messages to ignore
         "(audit: )?type=1403 audit.*",
         "(audit: )?type=1404 audit.*",
+        "(audit: )?type=1405 audit.*",
 
         # apparmor loading
         "(audit: )?type=1400.*apparmor=\"STATUS\".*",
@@ -1710,9 +2075,15 @@ class MachineCase(unittest.TestCase):
         "For security reasons, the password you type will not be visible",
 
         # starting out with empty PCP logs and pmlogger not running causes these metrics channel messages
-        "pcp-archive: no such metric: .*: Unknown metric name",
-        "pcp-archive: instance name lookup failed:.*",
-        "pcp-archive: couldn't create pcp archive context for.*",
+        "(direct|pcp-archive): no such metric: .*: Unknown metric name",
+        "(direct|pcp-archive): instance name lookup failed:.*",
+        "(direct|pcp-archive): couldn't create pcp archive context for.*",
+
+        # PCP Python bridge
+        "cockpit.channels.pcp-ERROR: no such metric: .*",
+
+        # timedatex.service shuts down after timeout, runs into race condition with property watching
+        ".*org.freedesktop.timedate1: couldn't get all properties.*Error:org.freedesktop.DBus.Error.NoReply.*",
     ]
 
     default_allowed_messages += os.environ.get("TEST_ALLOW_JOURNAL_MESSAGES", "").split(",")
@@ -1721,24 +2092,39 @@ class MachineCase(unittest.TestCase):
     default_allowed_console_errors = [
         # HACK: These should be fixed, but debugging these is not trivial, and the impact is very low
         "Warning: .* setState.*on an unmounted component",
-        "Warning: Can't perform a React state update on an unmounted component."
+        "Warning: Can't perform a React state update on an unmounted component",
+        "Warning: Cannot update a component.*while rendering a different component",
+        "Warning: A component is changing an uncontrolled input to be controlled",
+        "Warning: A component is changing a controlled input to be uncontrolled",
+        "Warning: Can't call.*on a component that is not yet mounted. This is a no-op",
+        "Warning: Cannot update during an existing state transition",
+        r"Warning: You are calling ReactDOMClient.createRoot\(\) on a container that has already been passed to createRoot",
+
+        # FIXME: PatternFly complains about these, but https://www.a11y-collective.com/blog/the-first-rule-for-using-aria/
+        # and https://www.accessibility-developer-guide.com/knowledge/aria/bad-practices/
+        "aria-label",
+
+        # PackageKit crashes a lot; let that not be the sole reason for failing a test
+        "error: Could not determine kpatch packages:.*PackageKit crashed",
     ]
 
-    default_allowed_console_errors += os.environ.get("TEST_ALLOW_BROWSER_ERRORS", "").split(",")
+    env_allow = os.environ.get("TEST_ALLOW_BROWSER_ERRORS")
+    if env_allow:
+        default_allowed_console_errors += env_allow.split(",")
 
-    def allow_journal_messages(self, *patterns):
+    def allow_journal_messages(self, *patterns: str) -> None:
         """Don't fail if the journal contains a entry completely matching the given regexp"""
         for p in patterns:
             self.allowed_messages.append(p)
 
-    def allow_hostkey_messages(self):
+    def allow_hostkey_messages(self) -> None:
         self.allow_journal_messages('.*: .* host key for server is not known: .*',
                                     '.*: refusing to connect to unknown host: .*',
                                     '.*: .* host key for server has changed to: .*',
                                     '.*: host key for this server changed key type: .*',
                                     '.*: failed to retrieve resource: hostkey-unknown')
 
-    def allow_restart_journal_messages(self):
+    def allow_restart_journal_messages(self) -> None:
         self.allow_journal_messages(".*Connection reset by peer.*",
                                     "connection unexpectedly closed by peer",
                                     ".*Broken pipe.*",
@@ -1751,7 +2137,8 @@ class MachineCase(unittest.TestCase):
                                     ".*couldn't create polkit session subject: No session for pid.*",
                                     "We are no longer a registered authentication agent.",
                                     ".*: failed to retrieve resource: terminated",
-                                    ".*: external channel failed: terminated",
+                                    ".*: external channel failed:.*",
+                                    ".*: truncated data in external channel",
                                     'audit:.*denied.*comm="systemd-user-se".*nologin.*',
                                     ".*No session for cookie",
 
@@ -1767,11 +2154,14 @@ class MachineCase(unittest.TestCase):
                                     'which: no python in .*'
                                     )
 
-    def check_journal_messages(self, machine=None):
+        # happens when logging out quickly while tracer is running
+        self.allow_browser_errors("Tracer failed:.*internal-error")
+
+    def check_journal_messages(self, machine: testvm.Machine | None = None) -> None:
         """Check for unexpected journal entries."""
         machine = machine or self.machine
         # on main machine, only consider journal entries since test case start
-        cursor = (machine == self.machine) and self.journal_start or None
+        cursor = self.journal_start if machine == self.machine else None
 
         # Journald does not always set trusted fields like
         # _SYSTEMD_UNIT or _EXE correctly for the last few messages of
@@ -1786,8 +2176,6 @@ class MachineCase(unittest.TestCase):
             "_COMM=cockpit-ws",
             "GLIB_DOMAIN=cockpit-ws",
             "GLIB_DOMAIN=cockpit-bridge",
-            "GLIB_DOMAIN=cockpit-ssh",
-            "GLIB_DOMAIN=cockpit-pcp"
         ]
 
         if not self.allow_core_dumps:
@@ -1796,36 +2184,6 @@ class MachineCase(unittest.TestCase):
             # can happen on shutdown when /run/systemd/coredump is gone already
             self.allowed_messages.append("Failed to connect to coredump service: No such file or directory")
             self.allowed_messages.append("Failed to connect to coredump service: Connection refused")
-
-        # HACK: pybridge bugs
-        if os.environ.get("TEST_SCENARIO") == "pybridge":
-            # https://github.com/cockpit-project/cockpit/issues/18386
-            self.allowed_messages += [
-                "asyncio-ERROR: Task was destroyed but it is pending!",
-                "task:.*Task pending.*cockpit/channels/dbus.py.*"]
-
-            # happens fairly reliably with TestConnection.testTls and TestHistoryMetrics.testEvents
-            self.allowed_messages += [
-                r'asyncio-ERROR: Exception in callback None\(\)',
-                r'handle: <Handle cancelled>',
-                r'Traceback \(most recent call last\):',
-                r'File "/usr/lib64/python3.6/asyncio/events.py", line .*, in _run',
-                r'self._callback\(\*self._args\)',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/transports.py", line .*, in _read_ready',
-                r'self._protocol.data_received\(data\)',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/protocol.py", line .*, in data_received',
-                r'result = self.consume_one_frame\(self.buffer\)',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/protocol.py", line .*, in consume_one_frame',
-                r'self.frame_received.*',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/protocol.py", line .*, in frame_received',
-                r'self.channel_control_received\(channel, command, message\)',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/peer.py", line .*, in channel_control_received',
-                r'self.send_channel_control.*message.*',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/router.py", line .*, in send_channel_control',
-                r'self.router.drop_channel\(channel\)',
-                r'File "/usr/local/lib64/python3.6/site-packages/cockpit/router.py", line .*, in drop_channel',
-                r'assert channel in self.open_channels, \(self.open_channels, channel\)',
-                r"AssertionError: \({}, '.*'\)"]
 
         messages = machine.journal_messages(matches, 6, cursor=cursor)
 
@@ -1862,19 +2220,20 @@ class MachineCase(unittest.TestCase):
                     first = m
                 print(m)
         if not all_found:
+            assert first is not None
             self.copy_js_log("FAIL")
             self.copy_journal("FAIL")
             self.copy_cores("FAIL")
-            if self.checkSuccess():
+            if not self.getError():
                 # fail test on the unexpected messages
                 raise Error(UNEXPECTED_MESSAGE + "journal messages:\n" + first)
 
-    def allow_browser_errors(self, *patterns):
+    def allow_browser_errors(self, *patterns: str) -> None:
         """Don't fail if the test caused a console error contains the given regexp"""
         for p in patterns:
             self.allowed_console_errors.append(p)
 
-    def check_browser_errors(self):
+    def check_browser_errors(self) -> None:
         if not self.browser:
             return
         for log in self.browser.get_js_log():
@@ -1889,70 +2248,13 @@ class MachineCase(unittest.TestCase):
 
         self.browser.assert_no_oops()
 
-    def check_pixel_tests(self):
+    def check_pixel_tests(self) -> None:
         if self.browser:
             self.browser.assert_no_unused_pixel_test_references()
             if self.browser.failed_pixel_tests > 0:
                 raise Error(PIXEL_TEST_MESSAGE)
 
-    def check_axe(self, label=None, suffix=""):
-        """Run aXe check on the currently active frame
-
-        The report gets written into an attachment
-        "<label>-axe-{violations,incomplete}.json". If you specify a suffix, it
-        will be appended to the file name, which is useful if you call this
-        more than once within one test.
-        """
-
-        # Only test Axe on chromium browsers
-        if self.browser.cdp.browser.name != "chromium":
-            return
-
-        if not checkRunAxe():
-            return
-
-        report = self.browser.eval_js("axe.run()", no_trace=True)
-
-        # trim the report
-        def delkeys(dict, *keys):
-            for key in keys:
-                try:
-                    del dict[key]
-                except KeyError:
-                    pass
-        delkeys(report, "passes", "inapplicable", "timestamp")
-
-        for outcome in ["violations", "incomplete"]:
-            for test in report[outcome]:
-                delkeys(test, "tags", "help", "impact")
-
-                # failureSummary in nodes is highly repetitive and long, so summarize it on violation level
-                summaries = set()
-                for result in test["nodes"]:
-                    if "failureSummary" in result:
-                        summaries.add(result["failureSummary"])
-                    delkeys(result, "all", "any", "none", "impact", "failureSummary")
-
-                    # trim containing iframes from targets
-                    if result.get("target", []):
-                        result["target"] = result["target"][-1]
-
-                if summaries:
-                    test["failureSummaries"] = list(summaries)
-
-        # write the report
-        if suffix:
-            suffix = "-" + suffix
-        filename = "{0}{1}-axe.json.gz".format(label or self.label(), suffix)
-        with gzip.open(filename, "wb") as f:
-            f.write(json.dumps(report).encode('UTF-8'))
-        print("Wrote accessibility report to " + filename)
-        attach(filename, move=True)
-
-        # aXe triggers that *shrug*
-        self.allow_journal_messages("received invalid message without channel prefix")
-
-    def snapshot(self, title, label=None):
+    def snapshot(self, title: str, label: str | None = None) -> None:
         """Take a snapshot of the current screen and save it as a PNG.
 
         Arguments:
@@ -1961,12 +2263,12 @@ class MachineCase(unittest.TestCase):
         if self.browser is not None:
             try:
                 self.browser.snapshot(title, label)
-            except RuntimeError:
+            except Error:
                 # this usually runs in exception handlers; raising an exception here skips cleanup handlers, so don't
                 sys.stderr.write("Unexpected exception in snapshot():\n")
                 sys.stderr.write(traceback.format_exc())
 
-    def copy_js_log(self, title, label=None):
+    def copy_js_log(self, title: str, label: str | None = None) -> None:
         if self.browser is not None:
             try:
                 self.browser.copy_js_log(title, label)
@@ -1975,19 +2277,19 @@ class MachineCase(unittest.TestCase):
                 sys.stderr.write("Unexpected exception in copy_js_log():\n")
                 sys.stderr.write(traceback.format_exc())
 
-    def copy_journal(self, title, label=None):
-        for name, m in self.machines.items():
+    def copy_journal(self, title: str, label: str | None = None) -> None:
+        for _, m in self.machines.items():
             if m.ssh_reachable:
-                log = "%s-%s-%s.log.gz" % (label or self.label(), m.label, title)
+                log = unique_filename("%s-%s-%s" % (label or self.label(), m.label, title), "log.gz")
                 with open(log, "w") as fp:
                     m.execute("journalctl|gzip", stdout=fp)
                     print("Journal extracted to %s" % (log))
                     attach(log, move=True)
 
-    def copy_cores(self, title: str, label: Optional[str] = None):
+    def copy_cores(self, title: str, label: str | None = None) -> None:
         if self.allow_core_dumps:
             return
-        for name, m in self.machines.items():
+        for _, m in self.machines.items():
             if m.ssh_reachable:
                 directory = "%s-%s-%s.core" % (label or self.label(), m.label, title)
                 dest = os.path.abspath(directory)
@@ -2003,21 +2305,21 @@ class MachineCase(unittest.TestCase):
                         # Enable this to temporarily(!) create artifacts for core dumps, if a crash is hard to reproduce
                         # attach(dest, move=True)
 
-    def settle_cpu(self):
+    def settle_cpu(self) -> None:
         """Wait until CPU usage in the VM settles down
 
         Wait until the process with the highest CPU usage drops below 20%
         usage. Wait for up to a minute, then return. There is no error if the
         CPU stays busy, as usually a test then should just try to run anyway.
         """
-        for retry in range(20):
+        for _ in range(20):
             # get the CPU percentage of the most busy process
             busy_proc = self.machine.execute("ps --no-headers -eo pcpu,pid,args | sort -k 1 -n -r | head -n1")
             if float(busy_proc.split()[0]) < 20.0:
                 break
             time.sleep(3)
 
-    def sed_file(self, expr: str, path: str, apply_change_action: Optional[str] = None):
+    def sed_file(self, expr: str, path: str, apply_change_action: str | None = None) -> None:
         """sed a file on primary machine
 
         This is safe for @nondestructive tests, the file will be restored during cleanup.
@@ -2025,56 +2327,79 @@ class MachineCase(unittest.TestCase):
         The optional apply_change_action will be run both after sedding and after restoring the file.
         """
         m = self.machine
-        m.execute("sed -i.cockpittest '{0}' {1}".format(expr, path))
+        m.execute(f"sed -i.cockpittest '{expr}' {path}")
         if apply_change_action:
             m.execute(apply_change_action)
 
         if self.is_nondestructive():
             if apply_change_action:
                 self.addCleanup(m.execute, apply_change_action)
-            self.addCleanup(m.execute, "mv {0}.cockpittest {0}".format(path))
+            self.addCleanup(m.execute, f"mv {path}.cockpittest {path}")
 
     def file_exists(self, path: str) -> bool:
         """Check if file exists on test machine"""
-
         return self.machine.execute(f"if test -e {path}; then echo yes; fi").strip() != ""
 
-    def restore_dir(self, path: str, post_restore_action: Optional[str] = None, reboot_safe: bool = False):
+    def restore_dir(
+        self,
+        path: str,
+        post_restore_action: str | None = None,
+        reboot_safe: bool = False,
+        restart_unit: str | None = None
+    ) -> None:
         """Backup/restore a directory for a nondestructive test
 
         This takes care to not ever touch the original content on disk, but uses transient overlays.
         As this uses a bind mount, it does not work for files that get changed atomically (with mv);
         use restore_file() for these.
 
+        `restart_unit` will be stopped before restoring path, and restarted afterwards if it was running.
         The optional post_restore_action will run after restoring the original content.
 
         If the directory needs to survive reboot, `reboot_safe=True` needs to be specified; then this
         will just backup/restore the directory instead of bind-mounting, which is less robust.
         """
-        if not self.is_nondestructive() and not self.machine.ostree_image:
+        if not self.is_nondestructive():
             return  # skip for efficiency reasons
 
+        exe = self.machine.execute
+
         if not self.file_exists(path):
-            self.addCleanup(self.machine.execute, "rm -rf {0}".format(path))
+            self.addCleanup(exe, f"rm -rf '{path}'")
             return
 
         backup = os.path.join(self.vm_tmpdir, path.replace('/', '_'))
-        self.machine.execute("mkdir -p %(vm_tmpdir)s; cp -a %(path)s/ %(backup)s/" % {
-            "vm_tmpdir": self.vm_tmpdir, "path": path, "backup": backup})
+        exe(f"mkdir -p {self.vm_tmpdir}; cp -a {path}/ {backup}/")
 
         if not reboot_safe:
-            self.machine.execute("mount -o bind %(backup)s %(path)s" % {
-                "path": path, "backup": backup})
+            exe(f"mount -o bind {backup} {path}")
+
+        if restart_unit:
+            restart_stamp = f"/run/cockpit_restart_{restart_unit}"
+            self.addCleanup(
+                exe,
+                f"if [ -e {restart_stamp} ]; then systemctl start {restart_unit}; rm {restart_stamp}; fi"
+            )
 
         if post_restore_action:
-            self.addCleanup(self.machine.execute, post_restore_action)
+            self.addCleanup(exe, post_restore_action)
 
         if reboot_safe:
-            self.addCleanup(self.machine.execute, "rm -rf {0}; mv {1} {0}".format(path, backup))
+            self.addCleanup(exe, f"rm -rf {path}; mv {backup} {path}")
         else:
-            self.addCleanup(self.machine.execute, "umount -lf " + path)
+            # HACK: a lot of tests call this on /home/...; that restoration happens before killing all user
+            # processes in nonDestructiveSetup(), so we have to do it lazily
+            if path.startswith("/home"):
+                cmd = f"umount -lf {path}"
+            else:
+                cmd = f"umount {path} || {{ fuser -uvk {path} {path}/* >&2 || true; sleep 1; umount {path}; }}"
+            self.addCleanup(exe, cmd)
 
-    def restore_file(self, path: str, post_restore_action: Optional[str] = None):
+        if restart_unit:
+            self.addCleanup(exe, f"if systemctl --quiet is-active {restart_unit}; then touch {restart_stamp}; fi; "
+                            f"systemctl stop {restart_unit}")
+
+    def restore_file(self, path: str, post_restore_action: str | None = None) -> None:
         """Backup/restore a file for a nondestructive test
 
         This is less robust than restore_dir(), but works for files that need to get changed atomically.
@@ -2084,18 +2409,25 @@ class MachineCase(unittest.TestCase):
         if not self.is_nondestructive():
             return  # skip for efficiency reasons
 
+        if post_restore_action:
+            self.addCleanup(self.machine.execute, post_restore_action)
+
         if self.file_exists(path):
             backup = os.path.join(self.vm_tmpdir, path.replace('/', '_'))
-            self.machine.execute("mkdir -p %(vm_tmpdir)s; cp -a %(path)s %(backup)s" % {
-                "vm_tmpdir": self.vm_tmpdir, "path": path, "backup": backup})
-            if post_restore_action:
-                self.addCleanup(self.machine.execute, post_restore_action)
-            self.addCleanup(self.machine.execute, "mv %(backup)s %(path)s" % {"path": path, "backup": backup})
+            self.machine.execute(f"mkdir -p {self.vm_tmpdir}; cp -a {path} {backup}")
+            self.addCleanup(self.machine.execute, f"mv {backup} {path}")
         else:
-            self.addCleanup(self.machine.execute, "rm -rf %s" % path)
+            self.addCleanup(self.machine.execute, f"rm -f {path}")
 
-    def write_file(self, path: str, content: str, append: bool = False, owner: Optional[str] = None, perm: Optional[str] = None,
-                   post_restore_action: Optional[str] = None):
+    def write_file(
+        self,
+        path: str,
+        content: str,
+        append: bool = False,
+        owner: str | None = None,
+        perm: str | None = None,
+        post_restore_action: str | None = None
+    ) -> None:
         """Write a file on primary machine
 
         This is safe for @nondestructive tests, the file will be removed during cleanup.
@@ -2108,18 +2440,31 @@ class MachineCase(unittest.TestCase):
         self.restore_file(path, post_restore_action=post_restore_action)
         m.write(path, content, append=append, owner=owner, perm=perm)
 
-    def enable_root_login(self):
+    def enable_root_login(self) -> None:
         """Enable root login
 
         By default root login is disabled in cockpit, removing the root entry of /etc/cockpit/disallowed-users allows root to login.
         """
 
-        # fedora-coreos runs cockpit-ws in a containter so does not install cockpit-ws on the host
         disallowed_conf = '/etc/cockpit/disallowed-users'
-        if not self.machine.ostree_image and self.file_exists(disallowed_conf):
+        if not self.machine.ws_container and self.file_exists(disallowed_conf):
             self.sed_file('/root/d', disallowed_conf)
 
-    def setup_provisioned_hosts(self, disable_preload: bool = False):
+    def reboot(self, timeout_sec: int | None = None) -> None:
+        self.allow_restart_journal_messages()
+        if timeout_sec is None:
+            self.machine.reboot()
+        else:
+            self.machine.reboot(timeout_sec=timeout_sec)
+
+    def wait_reboot(self, timeout_sec: int | None = None) -> None:
+        self.allow_restart_journal_messages()
+        if timeout_sec is None:
+            self.machine.wait_reboot()
+        else:
+            self.machine.wait_reboot(timeout_sec=timeout_sec)
+
+    def setup_provisioned_hosts(self, disable_preload: bool = False) -> None:
         """Setup provisioned hosts for testing
 
         This sets the hostname of all machines to the name given in the
@@ -2130,163 +2475,170 @@ class MachineCase(unittest.TestCase):
             if disable_preload:
                 self.disable_preload("packagekit", "playground", "systemd", machine=m)
 
+    @staticmethod
+    def authorize_pubkey(machine: testvm.Machine, account: str, pubkey: str) -> None:
+        machine.execute(f"a={account} d=/home/$a/.ssh; mkdir -p $d; chown $a:$a $d; chmod 700 $d")
+        machine.write(f"/home/{account}/.ssh/authorized_keys", pubkey)
+        machine.execute(f"a={account}; chown $a:$a /home/$a/.ssh/authorized_keys")
+
+    @staticmethod
+    def get_pubkey(machine: testvm.Machine, account: str) -> str:
+        return machine.execute(f"cat /home/{account}/.ssh/id_rsa.pub")
+
+    def setup_ssh_auth(self) -> None:
+        self.machine.execute("d=/home/admin/.ssh; mkdir -p $d; chown admin:admin $d; chmod 700 $d")
+        self.machine.execute("test -f /home/admin/.ssh/id_rsa || ssh-keygen -f /home/admin/.ssh/id_rsa -t rsa -N ''")
+        self.machine.execute("chown admin:admin /home/admin/.ssh/id_rsa*")
+        pubkey = self.get_pubkey(self.machine, "admin")
+
+        for m in self.machines:
+            self.authorize_pubkey(self.machines[m], "admin", pubkey)
+
 
 ###########################
 # Global helper functions
 #
 
 
-def jsquote(js: str) -> str:
+def jsquote(js: object) -> str:
     return json.dumps(js)
 
 
-def checkRunAxe():
-    # only run this on the default OS test, that's enough
-    if os.getenv("TEST_OS") not in [None, testvm.TEST_OS_DEFAULT]:
-        return False
-
-    # when running from release tarballs, module is not available
-    if not os.path.exists(f'{BASE_DIR}/node_modules/axe-core/axe.js'):
-        sys.stderr.write('# enableAxe: axe is not installed, skipping\n')
-        return False
-
-    return True
-
-
-def enableAxe(method):
-    """Enable aXe accessibility test code injection for this test case"""
-
-    if not checkRunAxe():
-        return method
-
-    def wrapper(*args):
-        with open(f'{BASE_DIR}/node_modules/axe-core/axe.js') as f:
-            script = f.read()
-        # first method argument is "self", a MachineCase instance
-        args[0].browser.cdp.invoke("Page.addScriptToEvaluateOnNewDocument", source=script, no_trace=True)
-        return method(*args)
-
-    return wrapper
-
-
-def get_decorator(method, _class, name, default=None):
+def get_decorator(method: object, class_: object, name: str, default: Any = None) -> Any:
     """Get decorator value of a test method or its class
 
     Return None if the decorator was not set.
     """
     attr = "_testlib__" + name
-    return getattr(method, attr, getattr(_class, attr, default))
+    return getattr(method, attr, getattr(class_, attr, default))
 
 
 ###########################
 # Test decorators
 #
 
-def skipBrowser(reason: str, *args: str):
-    browser = os.environ.get("TEST_BROWSER", "chromium")
-    if browser in args:
-        return unittest.skip("{0}: {1}".format(browser, reason))
-    return lambda testEntity: testEntity
 
+def skipBrowser(reason: str, *browsers: str) -> Callable[[_FT], _FT]:
+    """Decorator for skipping a test on given browser(s)
 
-def skipImage(reason: str, *args: str):
-    if any(fnmatch.fnmatch(testvm.DEFAULT_IMAGE, arg) for arg in args):
-        return unittest.skip("{0}: {1}".format(testvm.DEFAULT_IMAGE, reason))
-    return lambda testEntity: testEntity
-
-
-def skipOstree(reason: str):
-    if testvm.DEFAULT_IMAGE in OSTREE_IMAGES:
-        return unittest.skip("{0}: {1}".format(testvm.DEFAULT_IMAGE, reason))
-    return lambda testEntity: testEntity
-
-
-def skipMobile():
-    if bool(os.environ.get("TEST_MOBILE", "")):
-        return unittest.skip("mobile: This test breaks on small screen sizes")
-    return lambda testEntity: testEntity
-
-
-def skipDistroPackage():
-    """For tests which apply to BaseOS packages
-
-    With that, tests can evolve with latest code, without constantly breaking them when
-    running against older package versions in the -distropkg tests.
+    Skips a test for provided *reason* on *browsers*.
     """
-    if 'distropkg' in testvm.DEFAULT_IMAGE:
-        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: Do not test BaseOS packages")
+    browser = os.environ.get("TEST_BROWSER", "chromium")
+    if browser in browsers:
+        return unittest.skip(f"{browser}: {reason}")
     return lambda testEntity: testEntity
 
 
-def skipPackage(*args):
-    packages_env = os.environ.get("TEST_SKIP_PACKAGES", "").split()
-    for package in args:
-        if package in packages_env:
-            return unittest.skip("{0} is excluded in $TEST_SKIP_PACKAGES".format(package))
+def skipImage(reason: str, *images: str) -> Callable[[_FT], _FT]:
+    """Decorator for skipping a test for given image(s)
+
+    Skip a test for a provided *reason* for given *images*. These
+    support Unix shell style patterns via fnmatch.fnmatch.
+
+    Example: @skipImage("no btrfs support on RHEL", "rhel-*")
+    """
+    if any(fnmatch.fnmatch(testvm.DEFAULT_IMAGE, img) for img in images):
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
     return lambda testEntity: testEntity
 
 
-def nondestructive(testEntity):
+def onlyImage(reason: str, *images: str) -> Callable[[_FT], _FT]:
+    """Decorator to only run a test on given image(s)
+
+    Only run this test on provided *images* for *reason*. These
+    support Unix shell style patterns via fnmatch.fnmatch.
+    """
+    if not any(fnmatch.fnmatch(testvm.DEFAULT_IMAGE, arg) for arg in images):
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
+    return lambda testEntity: testEntity
+
+
+def skipOstree(reason: str) -> Callable[[_FT], _FT]:
+    """Decorator for skipping a test on OSTree images
+
+    Skip test for *reason* on OSTree images defined in OSTREE_IMAGES in bots/lib/constants.py.
+    """
+    if testvm.DEFAULT_IMAGE in OSTREE_IMAGES:
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
+    return lambda testEntity: testEntity
+
+
+def isBeibootLogin() -> bool:
+    return "ws-container" in os.getenv("TEST_SCENARIO", "")
+
+
+def skipWsContainer(reason: str) -> Callable[[_FT], _FT]:
+    """Decorator for skipping a test with cockpit/ws"""
+    if testvm.DEFAULT_IMAGE in OSTREE_IMAGES or isBeibootLogin():
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
+    return lambda testEntity: testEntity
+
+
+def skipBeiboot(reason: str) -> Callable[[_FT], _FT]:
+    """Decorator for skipping a test with cockpit/ws in beiboot mode"""
+    if isBeibootLogin():
+        return unittest.skip(f"{testvm.DEFAULT_IMAGE}: {reason}")
+    return lambda testEntity: testEntity
+
+
+def nondestructive(testEntity: _T) -> _T:
     """Tests decorated as nondestructive will all run against the same VM
 
     Can be used on test classes and individual test methods.
     """
-    testEntity._testlib__nondestructive = True
+    setattr(testEntity, '_testlib__nondestructive', True)
     return testEntity
 
 
-def no_retry_when_changed(testEntity):
+def destructive(testEntity: _T) -> _T:
+    """Tests decorated as destructive will get their own VM
+
+    Can be used on test classes and individual test methods.
+    """
+    setattr(testEntity, '_testlib__nondestructive', False)
+    return testEntity
+
+
+def no_retry_when_changed(testEntity: _T) -> _T:
     """Tests decorated with no_retry_when_changed will only run once if they've been changed
 
     Tests that have been changed are expected to succeed 3 times, if the test
     takes a long time, this prevents timeouts. Can be used on test classes and
     individual methods.
     """
-    testEntity._testlib__no_retry_when_changed = True
+    setattr(testEntity, '_testlib__no_retry_when_changed', True)
     return testEntity
 
 
-def todo(reason='', flaky=False):
+def todo(reason: str = '') -> Callable[[_T], _T]:
     """Tests decorated with @todo are expected to fail.
 
     An optional reason can be given, and will appear in the TAP output if run
     via run-tests.
-
-    If flaky=False (the default) then the test is expected to always fail.  An
-    unexpected pass is considered to be an error in that case.  If flaky=True
-    then a pass is not considered to be an error.
     """
-    def wrapper(testEntity):
-        testEntity._testlib__todo = (reason, flaky)
+    def wrapper(testEntity: _T) -> _T:
+        setattr(testEntity, '_testlib__todo', reason)
         return testEntity
     return wrapper
 
 
-def todoPybridge(reason=None, flaky=False):
-    if os.getenv('TEST_SCENARIO') == 'pybridge':
-        return todo(reason or 'still fails with python bridge', flaky)
-    return lambda testEntity: testEntity
-
-
-def timeout(seconds):
+def timeout(seconds: int) -> Callable[[_T], _T]:
     """Change default test timeout of 600s, for long running tests
 
     Can be applied to an individual test method or the entire class. This only
     applies to test/common/run-tests, not to calling check-* directly.
     """
-    def wrapper(testEntity):
-        testEntity._testlib__timeout = seconds
+    def wrapper(testEntity: _T) -> _T:
+        setattr(testEntity, '_testlib__timeout', seconds)
         return testEntity
     return wrapper
 
 
 class TapRunner:
-
-    def __init__(self, verbosity=1):
-        self.stream = unittest.runner._WritelnDecorator(sys.stderr)
+    def __init__(self, verbosity: int = 1):
         self.verbosity = verbosity
 
-    def runOne(self, test):
+    def runOne(self, test: unittest.TestCase) -> unittest.TestResult:
         result = unittest.TestResult()
         print('# ----------------------------------------------------------------------')
         print('#', test)
@@ -2297,29 +2649,29 @@ class TapRunner:
             return result
         except Exception:
             result.addError(test, sys.exc_info())
-            sys.stderr.write("Unexpected exception while running {0}\n".format(test))
+            sys.stderr.write(f"Unexpected exception while running {test}\n")
             sys.stderr.write(traceback.format_exc())
             return result
         else:
             result.printErrors()
 
         if result.skipped:
-            print("# Result {0} skipped: {1}".format(test, result.skipped[0][1]))
+            print(f"# Result {test} skipped: {result.skipped[0][1]}")
         elif result.wasSuccessful():
-            print("# Result {0} succeeded".format(test))
+            print(f"# Result {test} succeeded")
         else:
             for failure in result.failures:
                 print(failure[1])
             for error in result.errors:
                 print(error[1])
-            print("# Result {0} failed".format(test))
+            print(f"# Result {test} failed")
         return result
 
-    def run(self, testable):
-        tests = []
+    def run(self, testable: unittest.TestSuite) -> int:
+        tests: list[unittest.TestCase] = []
 
         # The things to test
-        def collapse(test, tests):
+        def collapse(test: unittest.TestCase | unittest.TestSuite, tests: list[unittest.TestCase]) -> None:
             if isinstance(test, unittest.TestCase):
                 tests.append(test)
             else:
@@ -2343,34 +2695,38 @@ class TapRunner:
         # Report on the results
         duration = int(time.time() - start)
         hostname = socket.gethostname().split(".")[0]
-        details = "[{0}s on {1}]".format(duration, hostname)
+        details = f"[{duration}s on {hostname}]"
 
         MachineCase.kill_global_machine()
 
         # Return 77 if all tests were skipped
         if len(skips) == test_count:
-            sys.stdout.write("# SKIP {0}\n".format(", ".join(["{0} {1}".format(str(s[0]), s[1]) for s in skips])))
+            skipstr = ", ".join([f"{s[0]!s} {s[1]}" for s in skips])
+            sys.stdout.write(f"# SKIP {skipstr}\n")
             return 77
         if failures:
-            sys.stdout.write("# {0} TEST{1} FAILED {2}\n".format(failures, "S" if failures > 1 else "", details))
+            plural = "S" if failures > 1 else ""
+            sys.stdout.write(f"# {failures} TEST{plural} FAILED {details}\n")
             return 1
         else:
-            sys.stdout.write("# {0} TEST{1} PASSED {2}\n".format(test_count, "S" if test_count > 1 else "", details))
+            plural = "S" if test_count > 1 else ""
+            sys.stdout.write(f"# {test_count} TEST{plural} PASSED {details}\n")
             return 0
 
 
-def print_tests(tests):
+def print_tests(tests: unittest.TestSuite | Collection[unittest.TestSuite | unittest.TestCase]) -> None:
+    assert hasattr(unittest.loader, '_FailedTest')
     for test in tests:
         if isinstance(test, unittest.TestSuite):
             print_tests(test)
         elif isinstance(test, unittest.loader._FailedTest):
             name = test.id().replace("unittest.loader._FailedTest.", "")
-            print("Error: '{0}' does not match a test".format(name), file=sys.stderr)
+            print(f"Error: '{name}' does not match a test", file=sys.stderr)
         else:
             print(test.id().replace("__main__.", ""))
 
 
-def arg_parser(enable_sit=True):
+def arg_parser(enable_sit: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description='Run Cockpit test(s)')
     parser.add_argument('-v', '--verbose', dest="verbosity", action='store_const',
                         const=2, help='Verbose output')
@@ -2389,13 +2745,18 @@ def arg_parser(enable_sit=True):
                         help="Collect code coverage data")
     parser.add_argument("-l", "--list", action="store_true", help="Print the list of tests that would be executed")
     # TMT compatibility, pass testnames as whitespace separated list
-    parser.add_argument('tests', nargs='*', default=os.getenv("TEST_NAMES").split() if os.getenv("TEST_NAMES") else [])
+    parser.add_argument('tests', nargs='*', default=os.getenv("TEST_NAMES", '').split())
 
     parser.set_defaults(verbosity=1, fetch=True)
     return parser
 
 
-def test_main(options=None, suite=None, attachments=None, **kwargs):
+def test_main(
+     options: argparse.Namespace | None = None,
+     suite: unittest.TestSuite | None = None,
+     attachments: str | None = None,
+     **kwargs: object
+) -> int:
     """
     Run all test cases, as indicated by arguments.
 
@@ -2412,15 +2773,17 @@ def test_main(options=None, suite=None, attachments=None, **kwargs):
     sys.stdout.flush()
     sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buf_arg)
 
-    standalone = options is None
     parser = arg_parser()
     parser.add_argument('--machine', metavar="hostname[:port]", dest="address",
                         default=None, help="Run this test against an already running machine")
     parser.add_argument('--browser', metavar="hostname[:port]", dest="browser",
                         default=None, help="When using --machine, use this cockpit web address")
 
-    if standalone:
+    if options is None:
         options = parser.parse_args()
+        standalone = True
+    else:
+        standalone = False
 
     # Sit should always imply verbose
     if options.sit:
@@ -2459,14 +2822,14 @@ def test_main(options=None, suite=None, attachments=None, **kwargs):
 
 
 class Error(Exception):
-    def __init__(self, msg):
+    def __init__(self, msg: str) -> None:
         self.msg = msg
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.msg
 
 
-def wait(func: Callable, msg: Optional[str] = None, delay: int = 1, tries: int = 60):
+def wait(func: Callable[[], _T | None], msg: str | None = None, delay: int = 1, tries: int = 60) -> _T:
     """Wait for FUNC to return something truthy, and return that.
 
     FUNC is called repeatedly until it returns a true value or until a
@@ -2491,21 +2854,20 @@ def wait(func: Callable, msg: Optional[str] = None, delay: int = 1, tries: int =
         except Exception:
             if t == tries - 1:
                 raise
-            else:
-                pass
         t = t + 1
-        sleep(delay)
+        time.sleep(delay)
     raise Error(msg or "Condition did not become true.")
 
 
-def sit(machines={}):
+def sit(machines: Mapping[str, testvm.Machine] = {}) -> None:
     """
     Wait until the user confirms to continue.
 
     The current test case is suspended so that the user can inspect
     the browser.
     """
-    for (name, machine) in machines.items():
+
+    for machine in machines.values():
         sys.stderr.write(machine.diagnose())
     print("Press RET to continue...")
     sys.stdin.readline()

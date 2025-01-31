@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,17 +15,15 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from testlib import MachineCase, nondestructive, skipDistroPackage, skipImage, skipOstree, test_main
+import testlib
 
 
-@nondestructive
-@skipOstree("No tuned packaged")
-@skipImage("No tuned packaged", "arch")
-@skipDistroPackage()
-class TestTuned(MachineCase):
+@testlib.nondestructive
+@testlib.skipOstree("No tuned packaged")
+@testlib.skipImage("No tuned packaged", "arch")
+class TestTuned(testlib.MachineCase):
 
     def testBasic(self):
         b = self.browser
@@ -68,28 +66,28 @@ class TestTuned(MachineCase):
 
         b.wait_text('#tuned-status-button', recommended_profile)
         b.click('#tuned-status-button')
-        title_selector = ".pf-c-modal-box__header:contains('Change performance profile')"
+        title_selector = ".pf-v5-c-modal-box__header:contains('Change performance profile')"
         b.wait_visible(title_selector)
-        body_selector = ".pf-c-modal-box:contains('Change performance profile')"
+        body_selector = ".pf-v5-c-modal-box:contains('Change performance profile')"
         b.wait_visible(f"{body_selector} li > button.pf-m-selected p")
 
         # Make sure we see the recommended profile and its badges
         b.wait_in_text(f"{body_selector} li > button.pf-m-selected p", recommended_profile)
-        b.wait_visible(f"{body_selector} li > button.pf-m-selected .pf-c-label:contains('recommended')")
-        b.wait_visible(f"{body_selector} li > button.pf-m-selected .pf-c-label:contains('active')")
+        b.wait_visible(f"{body_selector} li > button.pf-m-selected .pf-v5-c-label:contains('recommended')")
+        b.wait_visible(f"{body_selector} li > button.pf-m-selected .pf-v5-c-label:contains('active')")
 
-        b.click(f"{body_selector} li > button p:contains('balanced')")
-        b.wait_visible(f"{body_selector} li > button.pf-m-selected p:contains('balanced')")
+        b.click(f"{body_selector} li[data-value='desktop'] > button")
+        b.wait_visible(f"{body_selector} li > button.pf-m-selected p:contains('desktop')")
 
         b.click(f"{body_selector} button.pf-m-primary")
         b.wait_not_present(title_selector)
 
-        b.wait_text('#tuned-status-button', "balanced")
+        b.wait_text('#tuned-status-button', "desktop")
         check_status_tooltip("This system is using a custom profile")
 
         # Check the status of tuned, it should show the profile
         output = m.execute("tuned-adm active 2>&1 || true")
-        self.assertIn("balanced", output)
+        self.assertIn("desktop", output)
         output = m.execute("systemctl status tuned")
         self.assertIn("enabled;", output)
 
@@ -121,4 +119,4 @@ class TestTuned(MachineCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

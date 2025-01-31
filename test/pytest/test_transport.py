@@ -13,7 +13,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import asyncio
 import contextlib
@@ -21,10 +21,11 @@ import errno
 import os
 import signal
 import subprocess
-import unittest
+import sys
 import unittest.mock
-
 from typing import Any, List, Optional, Tuple
+
+import pytest
 
 import cockpit.transports
 
@@ -93,14 +94,14 @@ class Protocol(cockpit.transports.SubprocessProtocol):
         assert transport.get_returncode() == returncode
 
 
-class TestSpooler(unittest.IsolatedAsyncioTestCase):
-    async def bad_fd(self) -> None:
+class TestSpooler:
+    @pytest.mark.asyncio
+    async def test_bad_fd(self) -> None:
         # Make sure failing to construct succeeds without further failures
         loop = asyncio.get_running_loop()
-        try:
+        with pytest.raises(OSError) as raises:
             cockpit.transports.Spooler(loop, -1)
-        except OSError as exc:
-            assert exc.errno == errno.EBADF
+        assert raises.value.errno == errno.EBADF
 
     def create_spooler(self, to_write: bytes = b'') -> cockpit.transports.Spooler:
         loop = asyncio.get_running_loop()
@@ -115,28 +116,33 @@ class TestSpooler(unittest.IsolatedAsyncioTestCase):
             os.close(writer)
         return spooler
 
+    @pytest.mark.asyncio
     async def test_poll_eof(self) -> None:
         spooler = self.create_spooler()
-        while not spooler.is_closed():
+        while spooler._fd != -1:
             await asyncio.sleep(0.1)
         assert spooler.get() == b''
 
+    @pytest.mark.asyncio
     async def test_nopoll_eof(self) -> None:
         spooler = self.create_spooler()
         assert spooler.get() == b''
-        assert spooler.is_closed()
+        assert spooler._fd == -1
 
+    @pytest.mark.asyncio
     async def test_poll_small(self) -> None:
         spooler = self.create_spooler(b'abcd')
-        while not spooler.is_closed():
+        while spooler._fd != -1:
             await asyncio.sleep(0.1)
         assert spooler.get() == b'abcd'
 
+    @pytest.mark.asyncio
     async def test_nopoll_small(self) -> None:
         spooler = self.create_spooler(b'abcd')
         assert spooler.get() == b'abcd'
-        assert spooler.is_closed()
+        assert spooler._fd == -1
 
+    @pytest.mark.asyncio
     async def test_big(self) -> None:
         loop = asyncio.get_running_loop()
         reader, writer = os.pipe()
@@ -156,17 +162,17 @@ class TestSpooler(unittest.IsolatedAsyncioTestCase):
                 while len(spooler.get()) < written:
                     await asyncio.sleep(0.01)
 
-            assert not spooler.is_closed()
+            assert spooler._fd != -1
         finally:
             os.close(writer)
 
         await asyncio.sleep(0.1)
-        assert spooler.is_closed()
+        assert spooler._fd == -1
 
         assert len(spooler.get()) == written
 
 
-class TestEpollLimitations(unittest.IsolatedAsyncioTestCase):
+class TestEpollLimitations:
     # https://github.com/python/cpython/issues/73903
     #
     # There are some types of files that epoll doesn't work with, returning
@@ -177,19 +183,21 @@ class TestEpollLimitations(unittest.IsolatedAsyncioTestCase):
         loop = asyncio.get_running_loop()
         with open(filename) as fp:
             spooler = cockpit.transports.Spooler(loop, fp.fileno())
-        while not spooler.is_closed():
+        while spooler._fd != -1:
             await asyncio.sleep(0.1)
 
-    @unittest.expectedFailure
+    @pytest.mark.xfail
+    @pytest.mark.asyncio
     async def test_read_file(self) -> None:
         await self.spool_file(__file__)
 
-    @unittest.expectedFailure
+    @pytest.mark.xfail
+    @pytest.mark.asyncio
     async def test_dev_null(self) -> None:
         await self.spool_file('/dev/null')
 
 
-class TestStdio(unittest.IsolatedAsyncioTestCase):
+class TestStdio:
     @contextlib.contextmanager
     def create_terminal(self):
         ours, theirs = os.openpty()
@@ -202,23 +210,25 @@ class TestStdio(unittest.IsolatedAsyncioTestCase):
         os.close(stdin)
         os.close(stdout)
 
+    @pytest.mark.asyncio
     async def test_terminal_write_eof(self):
         # Make sure write_eof() fails
-        with self.create_terminal() as (ours, protocol, transport):
+        with self.create_terminal() as (ours, _protocol, transport):
             assert not transport.can_write_eof()
-            with self.assertRaises(RuntimeError):
+            with pytest.raises(RuntimeError):
                 transport.write_eof()
             os.close(ours)
 
+    @pytest.mark.asyncio
     async def test_terminal_disconnect(self):
         # Make sure disconnecting the session shows up as an EOF
-        with self.create_terminal() as (ours, protocol, transport):
+        with self.create_terminal() as (ours, protocol, _transport):
             os.close(ours)
             while not protocol.eof:
                 await asyncio.sleep(0.1)
 
 
-class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
+class TestSubprocessTransport:
     def subprocess(self, args, **kwargs: Any) -> Tuple[Protocol, cockpit.transports.SubprocessTransport]:
         loop = asyncio.get_running_loop()
         protocol = Protocol()
@@ -227,11 +237,13 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         assert protocol.transport == transport
         return protocol, transport
 
+    @pytest.mark.asyncio
     async def test_true(self) -> None:
         protocol, transport = self.subprocess(['true'])
         await protocol.eof_and_exited_with_code(0)
-        assert transport.get_stderr() is None
+        assert transport.get_stderr() == ''
 
+    @pytest.mark.asyncio
     async def test_cat(self) -> None:
         protocol, transport = self.subprocess(['cat'])
         protocol.close_on_eof = False
@@ -243,19 +255,26 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         assert transport.get_returncode() == 0
         assert protocol.sent == protocol.received
         transport.close()
+        # make sure the connection_lost handler isn't called immediately
+        assert protocol.transport is not None
+        # ...but "soon" (in the very next mainloop iteration)
+        await asyncio.sleep(0.01)
         assert protocol.transport is None
 
+    @pytest.mark.asyncio
     async def test_send_signal(self) -> None:
         protocol, transport = self.subprocess(['cat'])
         transport.send_signal(signal.SIGINT)
         await protocol.eof_and_exited_with_code(-signal.SIGINT)
 
+    @pytest.mark.asyncio
     async def test_pid(self) -> None:
         protocol, transport = self.subprocess(['sh', '-c', 'echo $$'])
         protocol.output = []
         await protocol.eof_and_exited_with_code(0)
         assert int(protocol.get_output()) == transport.get_pid()
 
+    @pytest.mark.asyncio
     async def test_terminate(self) -> None:
         protocol, transport = self.subprocess(['cat'])
         transport.kill()
@@ -265,6 +284,7 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         transport.terminate()
         await protocol.eof_and_exited_with_code(-signal.SIGTERM)
 
+    @pytest.mark.asyncio
     async def test_stderr(self) -> None:
         loop = asyncio.get_running_loop()
         protocol = Protocol()
@@ -280,23 +300,18 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         assert transport.get_stderr() == ''
         assert transport.get_stderr(reset=True) == ''
 
-    async def test_safe_watcher_ENOSYS(self) -> None:
-        with unittest.mock.patch('asyncio.PidfdChildWatcher', unittest.mock.Mock(side_effect=OSError)):
-            protocol, transport = self.subprocess(['true'])
-            watcher = transport._get_watcher(asyncio.get_running_loop())
-            assert isinstance(watcher, asyncio.SafeChildWatcher)
-            await protocol.eof_and_exited_with_code(0)
-        assert isinstance(asyncio.PidfdChildWatcher, type)
+    @pytest.mark.asyncio
+    async def test_safe_watcher_ENOSYS(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        if sys.version_info >= (3, 12, 0):
+            pytest.skip()
 
-    async def test_safe_watcher_oldpy(self) -> None:
-        with unittest.mock.patch('asyncio.PidfdChildWatcher'):
-            del asyncio.PidfdChildWatcher
-            protocol, transport = self.subprocess(['true'])
-            watcher = transport._get_watcher(asyncio.get_running_loop())
-            assert isinstance(watcher, asyncio.SafeChildWatcher)
-            await protocol.eof_and_exited_with_code(0)
-        assert isinstance(asyncio.PidfdChildWatcher, type)
+        monkeypatch.setattr(asyncio, 'PidfdChildWatcher', unittest.mock.Mock(side_effect=OSError), raising=False)
+        protocol, transport = self.subprocess(['true'])
+        watcher = transport._get_watcher(asyncio.get_running_loop())
+        assert isinstance(watcher, asyncio.SafeChildWatcher)
+        await protocol.eof_and_exited_with_code(0)
 
+    @pytest.mark.asyncio
     async def test_true_pty(self) -> None:
         loop = asyncio.get_running_loop()
         protocol = Protocol()
@@ -305,6 +320,7 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         await protocol.eof_and_exited_with_code(0)
         assert protocol.received == protocol.sent == 0
 
+    @pytest.mark.asyncio
     async def test_broken_pipe(self) -> None:
         loop = asyncio.get_running_loop()
         protocol = Protocol()
@@ -318,9 +334,14 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         # Now let's write to the stdin with the other side closed.
         # This should be enough to immediately disconnect us (EPIPE)
         protocol.write(b'abc')
+        # make sure the connection_lost handler isn't called immediately
+        assert protocol.transport is not None
+        # ...but "soon" (in the very next mainloop iteration)
+        await asyncio.sleep(0.01)
         assert protocol.transport is None
         assert isinstance(protocol.exc, BrokenPipeError)
 
+    @pytest.mark.asyncio
     async def test_broken_pipe_backlog(self) -> None:
         loop = asyncio.get_running_loop()
         protocol = Protocol()
@@ -342,18 +363,28 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         assert protocol.transport is None
         assert isinstance(protocol.exc, BrokenPipeError)
 
+    @pytest.mark.asyncio
     async def test_window_size(self) -> None:
-        protocol, transport = self.subprocess(['bash', '-ic', 'while true; do sleep 0.1; echo ${LINES}x${COLUMNS}; done'],
+        protocol, transport = self.subprocess(['bash', '-ic',
+                                               """
+                                                   while true; do
+                                                       sleep 0.1
+                                                       echo ${LINES}x${COLUMNS}
+                                                   done
+                                               """],
                                               pty=True,
-                                              window={"rows": 22, "cols": 33})
+                                              window=cockpit.transports.WindowSize({'rows': 22, 'cols': 33}))
         protocol.output = []
         while b'22x33\r\n' not in protocol.get_output():
             await asyncio.sleep(0.1)
 
-        transport.set_window_size(44, 55)
+        transport.set_window_size(cockpit.transports.WindowSize({'rows': 44, 'cols': 55}))
         while b'44x55\r\n' not in protocol.get_output():
             await asyncio.sleep(0.1)
 
+        transport.close()
+
+    @pytest.mark.asyncio
     async def test_env(self) -> None:
         protocol, transport = self.subprocess(['bash', '-ic', 'echo $HOME'],
                                               pty=True,
@@ -361,3 +392,92 @@ class TestSubprocessTransport(unittest.IsolatedAsyncioTestCase):
         protocol.output = []
         while b'/test\r\n' not in protocol.get_output():
             await asyncio.sleep(0.1)
+
+        transport.close()
+
+    @pytest.mark.asyncio
+    async def test_simple_close(self) -> None:
+        protocol, transport = self.subprocess(['cat'])
+        protocol.output = []
+
+        protocol.write(b'abcd')
+        assert protocol.transport
+        assert protocol.transport.get_write_buffer_size() == 0
+        protocol.transport.close()
+        # make sure the connection_lost handler isn't called immediately
+        assert protocol.transport is not None
+        # ...but "soon" (in the very next mainloop iteration)
+        await asyncio.sleep(0.01)
+        assert protocol.transport is None
+        # we have another ref on the transport
+        transport.close()  # should be idempotent
+
+    @pytest.mark.asyncio
+    async def test_flow_control(self) -> None:
+        protocol, transport = self.subprocess(['cat'])
+        protocol.output = []
+
+        protocol.write(b'abcd')
+        assert protocol.transport is not None
+        transport.pause_reading()
+        await asyncio.sleep(0.1)
+        transport.resume_reading()
+        while protocol.received < 4:
+            await asyncio.sleep(0.1)
+        assert protocol.transport is not None
+        transport.write_eof()
+        protocol.close_on_eof = False
+        while not protocol.eof:
+            await asyncio.sleep(0.1)
+        assert not transport.is_reading()
+        transport.pause_reading()  # no-op
+        assert not transport.is_reading()
+        transport.resume_reading()  # no-op
+        assert not transport.is_reading()
+
+    @pytest.mark.asyncio
+    async def test_write_backlog_eof(self) -> None:
+        protocol, transport = self.subprocess(['cat'])
+        protocol.output = []
+        protocol.write_a_lot()
+
+        assert transport.can_write_eof()
+        transport.write_eof()
+        assert not transport.is_closing()
+        while protocol.transport is not None:
+            await asyncio.sleep(0.1)
+        assert protocol.transport is None
+
+    @pytest.mark.asyncio
+    async def test_write_backlog_close(self) -> None:
+        protocol, transport = self.subprocess(['cat'])
+        protocol.output = []
+        protocol.write_a_lot()
+
+        assert transport
+        transport.close()
+        assert transport.is_closing()
+        # FIXME: closing the channel should kill the process, like asyncio's SubprocessTransport
+        # See https://github.com/cockpit-project/cockpit/pull/18340
+        transport.kill()
+        while protocol.transport is not None:
+            await asyncio.sleep(0.1)
+        assert protocol.transport is None
+
+    @pytest.mark.asyncio
+    async def test_write_backlog_eof_and_close(self) -> None:
+        protocol, transport = self.subprocess(['cat'])
+        protocol.output = []
+        protocol.write_a_lot()
+
+        assert transport
+        transport.write_eof()
+        transport.close()
+        assert protocol.transport
+        assert protocol.transport.is_closing()
+        # FIXME: closing the channel should kill the process, like asyncio's SubprocessTransport
+        # See https://github.com/cockpit-project/cockpit/pull/18340
+        transport.kill()
+        while protocol.transport is not None:
+            await asyncio.sleep(0.1)
+        assert protocol.transport is None

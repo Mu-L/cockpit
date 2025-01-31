@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# shellcheck disable=SC3043         # local is not POSIX, but every shell has it
+# shellcheck disable=SC3013,SC3045  # ditto for test {-nt,-t}
+
 GITHUB_REPO='node-cache'
 SUBDIR='node_modules'
 
@@ -7,7 +10,8 @@ V="${V-0}" # default to friendly messages
 
 set -eu
 cd "${0%/*}/.."
-. tools/git-utils.sh
+# shellcheck source-path=SCRIPTDIR/..
+. test/common/git-utils.sh
 
 cmd_remove() {
     # if we did this for ourselves the rm is enough, but it might be the case
@@ -21,6 +25,12 @@ cmd_remove() {
 
 cmd_checkout() {
     # we default to check out the node_modules corresponding to the gitlink in the index
+    local force=""
+    if [ "${1-}" = "--force" ]; then
+        force="1"
+        shift
+    fi
+
     local sha="${1-$(get_index_gitlink node_modules)}"
 
     # fetch by sha to prevent us from downloading something we don't want
@@ -28,7 +38,7 @@ cmd_checkout() {
 
     # verify that our package.json is equal to the one the cached node_modules
     # was created with, unless --force is given
-    if [ "${1-}" != "--force" ]; then
+    if [ -z "$force" ]; then
         if ! cmp_from_cache "${sha}" '.package.json' 'package.json'; then
             cat >&2 <<EOF
 
@@ -57,7 +67,7 @@ EOF
 }
 
 cmd_install() {
-    test -e bots || tools/make-bots
+    test -e bots || test/common/make-bots
 
     # We first read the result directly into the cache, then we unpack it.
     tree="$(bots/npm download < package.json | tar_to_cache)"
@@ -82,7 +92,7 @@ cmd_push() {
 }
 
 cmd_verify() {
-    test -e bots || tools/make-bots
+    test -e bots || test/common/make-bots
 
     # Verifies that the package.json and node_modules of the given commit match.
     commit="$(git rev-parse "$1:node_modules")"
@@ -129,7 +139,8 @@ cmd_make_package_lock_json() {
 
     # Otherwise, our main goal is to ensure that the node_modules from
     # the index is the one that we actually have.
-    local sha="$(get_index_gitlink node_modules)"
+    local sha
+    sha="$(get_index_gitlink node_modules)"
     if [ ! -e node_modules/.git ]; then
         # nothing there yet...
         cmd_checkout
@@ -172,7 +183,8 @@ main() {
         exit 1
     fi
 
-    local fname="$(printf 'cmd_%s' "$1" | tr '-' '_')"
+    local fname
+    fname="$(printf 'cmd_%s' "$1" | tr '-' '_')"
     if ! type -t "${fname}" | grep -q function; then
         echo "Unknown subcommand '$1'"
         exit 1

@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -1572,18 +1572,6 @@ cockpit_pipe_take_stderr_as_utf8 (CockpitPipe *self)
   return data;
 }
 
-void
-cockpit_pipe_stop_stderr_capture (CockpitPipe *self)
-{
-  CockpitPipePrivate *priv = cockpit_pipe_get_instance_private (self);
-
-  if (priv->err_buffer)
-    {
-      priv->err_forward_to_log = TRUE;
-      forward_error (self);
-    }
-}
-
 /**
  * cockpit_pipe_exit_status:
  * @self: a pipe
@@ -1610,7 +1598,7 @@ cockpit_pipe_exit_status (CockpitPipe *self)
 /**
  * cockpit_pipe_consume:
  * @buffer: a data buffer
- * @before: amount of preceeding bytes to discard
+ * @before: amount of preceding bytes to discard
  * @length: length of data to consume
  * @after: amount of trailing bytes to discard
  *

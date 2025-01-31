@@ -18,16 +18,32 @@
 import configparser
 import logging
 import os
-
 from pathlib import Path
 
-from ._vendor.systemd_ctypes import bus
+from cockpit._vendor.systemd_ctypes import bus
 
 logger = logging.getLogger(__name__)
 
-ETC_COCKPIT = Path('/etc/cockpit')
 XDG_CONFIG_HOME = Path(os.getenv('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'))
 DOT_CONFIG_COCKPIT = XDG_CONFIG_HOME / 'cockpit'
+
+
+def lookup_config(filename: str) -> Path:
+    config_dirs = os.environ.get('XDG_CONFIG_DIRS', '/etc').split(':')
+    fallback = None
+    for config_dir in config_dirs:
+        config_path = Path(config_dir, 'cockpit', filename)
+        if not fallback:
+            fallback = config_path
+        if config_path.exists():
+            logger.debug('lookup_config(%s): found %s', filename, config_path)
+            return config_path
+
+    # default to the first entry in XDG_CONFIG_DIRS; that's not according to the spec,
+    # but what Cockpit has done for years
+    logger.debug('lookup_config(%s): defaulting to %s', filename, fallback)
+    assert fallback  # mypy; config_dirs always has at least one string
+    return fallback
 
 
 class Config(bus.Object, interface='cockpit.Config'):
@@ -38,8 +54,8 @@ class Config(bus.Object, interface='cockpit.Config'):
     def get_string(self, section, key):
         try:
             return self.config[section][key]
-        except KeyError:
-            raise bus.BusError('cockpit.Config.KeyError', f'key {key} in section {section} does not exist')
+        except KeyError as exc:
+            raise bus.BusError('cockpit.Config.KeyError', f'key {key} in section {section} does not exist') from exc
 
     @bus.Interface.Method(out_types='u', in_types='ssuuu')
     def get_u_int(self, section, key, default, maximum, minimum):
@@ -51,7 +67,7 @@ class Config(bus.Object, interface='cockpit.Config'):
         try:
             int_val = int(value)
         except ValueError:
-            logger.warning(f'cockpit.conf: [{section}] {key} is not an integer')
+            logger.warning('cockpit.conf: [%s] %s is not an integer', section, key)
             return default
 
         return min(max(int_val, minimum), maximum)
@@ -59,16 +75,15 @@ class Config(bus.Object, interface='cockpit.Config'):
     @bus.Interface.Method()
     def reload(self):
         self.config = configparser.ConfigParser(interpolation=None)
-
-        config_dirs = os.environ.get('XDG_CONFIG_DIRS', '/etc').split(':')
-        for config_dir in config_dirs:
-            config_file = os.path.join(config_dir, 'cockpit', 'cockpit.conf')
-            if os.path.exists(config_file):
-                logger.debug("cockpit.Config: loading %s", config_file)
-                self.config.read(config_file)
-                break
-
-        # it's ok to not have a config file and thus leave self.config empty
+        cockpit_conf = lookup_config('cockpit.conf')
+        logger.debug("cockpit.Config: loading %s", cockpit_conf)
+        # this may not exist, but it's ok to not have a config file and thus leave self.config empty
+        try:
+            self.config.read(cockpit_conf)
+        except configparser.Error as exc:
+            logger.warning("cockpit.conf is invalid: %s", exc)
+            self.config.clear()
+            return
 
 
 class Environment(bus.Object, interface='cockpit.Environment'):
