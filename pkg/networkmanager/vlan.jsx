@@ -15,7 +15,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState, useContext } from 'react';
@@ -88,11 +88,12 @@ export const VlanDialog = ({ connection, dev, settings }) => {
         <NetworkModal dialogError={dialogError}
                       idPrefix={idPrefix}
                       onSubmit={onSubmit}
-                      title={_("VLAN settings")}
+                      title={!connection ? _("Add VLAN") : _("Edit VLAN settings")}
+                      isCreateDialog={!connection}
         >
             <>
                 <FormGroup fieldId={idPrefix + "-parent-select"} label={_("Parent")}>
-                    <FormSelect id={idPrefix + "-parent-select"} onChange={value => {
+                    <FormSelect id={idPrefix + "-parent-select"} onChange={(_, value) => {
                         setParent(value);
                         if (iface == (parent + "." + vlanId))
                             setIface(value + "." + vlanId);
@@ -102,7 +103,7 @@ export const VlanDialog = ({ connection, dev, settings }) => {
                     </FormSelect>
                 </FormGroup>
                 <FormGroup fieldId={idPrefix + "-vlan-id-input"} label={_("VLAN ID")}>
-                    <TextInput id={idPrefix + "-vlan-id-input"} value={vlanId} onChange={value => {
+                    <TextInput id={idPrefix + "-vlan-id-input"} value={vlanId} onChange={(_event, value) => {
                         setVlanId(value);
                         if (iface == (parent + "." + vlanId))
                             setIface(parent + "." + value);

@@ -13,7 +13,7 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 import re
 import subprocess
@@ -22,14 +22,16 @@ from testlib import Error, MachineCase, wait
 
 
 class NetworkHelpers:
-    '''Mix-in class for tests that require network setup'''
+    """Mix-in class for tests that require network setup"""
 
-    def add_veth(self, name, dhcp_cidr=None, dhcp_range=['10.111.112.2', '10.111.127.254']):
-        '''Add a veth device that is manageable with NetworkManager
+    def add_veth(self, name, dhcp_cidr=None, dhcp_range=None):
+        """Add a veth device that is manageable with NetworkManager
 
         This is safe for @nondestructive tests, the interface gets cleaned up automatically.
-        '''
-        self.machine.execute(r"""set -e
+        """
+        if dhcp_range is None:
+            dhcp_range = ['10.111.112.2', '10.111.127.254']
+        self.machine.execute(r"""
             mkdir -p /run/udev/rules.d/
             echo 'ENV{ID_NET_DRIVER}=="veth", ENV{INTERFACE}=="%(name)s", ENV{NM_UNMANAGED}="0"' > /run/udev/rules.d/99-nm-veth-%(name)s-test.rules
             udevadm control --reload
@@ -38,19 +40,21 @@ class NetworkHelpers:
             udevadm trigger --subsystem-match=net
             udevadm settle
             """ % {"name": name})
-        self.addCleanup(self.machine.execute, "rm /run/udev/rules.d/99-nm-veth-{0}-test.rules; ip link del dev {0}".format(name))
+        self.addCleanup(self.machine.execute, f"rm /run/udev/rules.d/99-nm-veth-{name}-test.rules; ip link del dev {name}")
         if dhcp_cidr:
             # up the remote end, give it an IP, and start DHCP server
-            self.machine.execute("ip a add {0} dev v_{1}; ip link set v_{1} up".format(dhcp_cidr, name))
-            server = self.machine.spawn("dnsmasq --keep-in-foreground --log-queries --log-facility=- "
-                                        "--conf-file=/dev/null --dhcp-leasefile=/tmp/leases.{0} --no-resolv "
-                                        "--bind-interfaces --except-interface=lo --interface=v_{0} --dhcp-range={1},{2},4h".format(name, dhcp_range[0], dhcp_range[1]),
+            self.machine.execute(f"ip a add {dhcp_cidr} dev v_{name}; ip link set v_{name} up")
+
+            self.machine.execute("mkdir -p /run/dnsmasq")
+            server = self.machine.spawn(f"dnsmasq --keep-in-foreground --log-queries --log-facility=- "
+                                        f"--conf-file=/dev/null --dhcp-leasefile=/run/dnsmasq/leases.{name} --no-resolv "
+                                        f"--bind-interfaces --except-interface=lo --interface=v_{name} --dhcp-range={dhcp_range[0]},{dhcp_range[1]},4h",
                                         f"dhcp-{name}.log")
-            self.addCleanup(self.machine.execute, "kill %i" % server)
+            self.addCleanup(self.machine.execute, f"kill {server}; rm -rf /run/dnsmasq")
             self.machine.execute("if firewall-cmd --state >/dev/null 2>&1; then firewall-cmd --add-service=dhcp; fi")
 
     def nm_activate_eth(self, iface):
-        '''Create an NM connection for a given interface'''
+        """Create an NM connection for a given interface"""
 
         m = self.machine
         wait(lambda: m.execute(f'nmcli device | grep "{iface}.*disconnected"'))
@@ -82,8 +86,10 @@ class NetworkCase(MachineCase, NetworkHelpers):
                 self.machine.execute(f"for d in {' '.join(new)}; do nmcli dev del $d; done")
 
             self.orig_devs = devs()
-            self.restore_dir("/etc/NetworkManager", post_restore_action="systemctl try-restart NetworkManager")
+            self.restore_dir("/etc/NetworkManager", restart_unit="NetworkManager")
             self.restore_dir("/etc/sysconfig/network-scripts")
+            self.restore_dir("/etc/netplan")
+            self.restore_dir("/run/NetworkManager/system-connections")
             self.addCleanup(cleanupDevs)
 
         m.execute("systemctl start NetworkManager")
@@ -109,12 +115,14 @@ class NetworkCase(MachineCase, NetworkHelpers):
         m.execute("systemctl reload-or-restart NetworkManager")
 
         # our assertions and pixel tests assume that virbr0 is absent
+        m.execute('[ -z "$(systemctl --legend=false list-unit-files libvirtd.service)" ] || '
+                  'systemctl try-restart libvirtd.service')
         if 'default' in m.execute("virsh net-list --name || true"):
             m.execute("virsh net-autostart --disable default; virsh net-destroy default")
 
         ver = self.machine.execute(
             "busctl --system get-property org.freedesktop.NetworkManager /org/freedesktop/NetworkManager org.freedesktop.NetworkManager Version || true")
-        ver_match = re.match('s "(.*)"', ver)
+        ver_match = re.match(r's "(.*)"', ver)
         if ver_match:
             self.networkmanager_version = [int(x) for x in ver_match.group(1).split(".")]
         else:
@@ -155,7 +163,7 @@ class NetworkCase(MachineCase, NetworkHelpers):
             text = "Inactive"
 
         try:
-            with self.browser.wait_timeout(20):
+            with self.browser.wait_timeout(30):
                 self.browser.wait_in_text(sel, text)
         except Error as e:
             print(f"Interface {iface} didn't show up.")
@@ -187,14 +195,14 @@ class NetworkCase(MachineCase, NetworkHelpers):
         m.execute("systemctl restart NetworkManager")
 
     def slow_down_dhclient(self, delay):
-        self.machine.execute("""set -e
-        mkdir -p {0}
-        cp -a /usr/sbin/dhclient {0}/dhclient.real
-        printf '#!/bin/sh\\nsleep {1}\\nexec {0}/dhclient.real "$@"' > {0}/dhclient
-        chmod a+x {0}/dhclient
-        if selinuxenabled 2>&1; then chcon --reference /usr/sbin/dhclient {0}/dhclient; fi
-        mount -o bind {0}/dhclient /usr/sbin/dhclient
-        """.format(self.vm_tmpdir, delay))
+        self.machine.execute(f"""
+        mkdir -p {self.vm_tmpdir}
+        cp -a /usr/sbin/dhclient {self.vm_tmpdir}/dhclient.real
+        printf '#!/bin/sh\\nsleep {delay}\\nexec {self.vm_tmpdir}/dhclient.real "$@"' > {self.vm_tmpdir}/dhclient
+        chmod a+x {self.vm_tmpdir}/dhclient
+        if selinuxenabled 2>&1; then chcon --reference /usr/sbin/dhclient {self.vm_tmpdir}/dhclient; fi
+        mount -o bind {self.vm_tmpdir}/dhclient /usr/sbin/dhclient
+        """)
         self.addCleanup(self.machine.execute, "umount /usr/sbin/dhclient")
 
     def wait_onoff(self, sel, val):

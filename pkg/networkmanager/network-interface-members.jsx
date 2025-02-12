@@ -14,15 +14,15 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 import cockpit from "cockpit";
 import React, { useState, useContext } from "react";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
-import { Card, CardActions, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
-import { Dropdown, DropdownItem, DropdownToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { Card, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
+import { Dropdown, DropdownItem, DropdownList } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
+import { MenuToggle } from "@patternfly/react-core/dist/esm/components/MenuToggle";
 import { Switch } from "@patternfly/react-core/dist/esm/components/Switch/index.js";
-import { Text, TextVariants } from "@patternfly/react-core/dist/esm/components/Text/index.js";
 import { MinusIcon } from '@patternfly/react-icons';
 
 import { ListingTable } from "cockpit-components-table.jsx";
@@ -68,14 +68,11 @@ export const NetworkInterfaceMembers = ({
                     aria-label={cockpit.format(_("Switch of $0"), iface.Name)}
                     isDisabled={!privileged}
                     isChecked={!!(dev && dev.ActiveConnection)}
-                    onChange={val => {
+                    onChange={(_event, val) => {
                         if (val) {
                             with_checkpoint(
                                 model,
-                                function () {
-                                    return member_con.activate(dev)
-                                            .fail(show_unexpected_error);
-                                },
+                                () => member_con.activate(dev).catch(show_unexpected_error),
                                 {
                                     devices: dev ? [dev] : [],
                                     fail_text: fmt_to_fragments(_("Switching on $0 will break the connection to the server, and will make the administration UI unavailable."), <b>{iface.Name}</b>),
@@ -84,10 +81,7 @@ export const NetworkInterfaceMembers = ({
                         } else if (dev) {
                             with_checkpoint(
                                 model,
-                                function () {
-                                    return dev.disconnect()
-                                            .fail(show_unexpected_error);
-                                },
+                                () => dev.disconnect().catch(show_unexpected_error),
                                 {
                                     devices: [dev],
                                     fail_text: fmt_to_fragments(_("Switching off $0 will break the connection to the server, and will make the administration UI unavailable."), <b>{iface.Name}</b>),
@@ -106,14 +100,11 @@ export const NetworkInterfaceMembers = ({
                             <div className="btn-group">
                                 {onoff}
                                 {privileged && <Button variant="secondary"
-                                    isSmall
+                                    size="sm"
                                     onClick={syn_click(model, () => {
                                         with_checkpoint(
                                             model,
-                                            function () {
-                                                return (free_member_connection(member_con)
-                                                        .fail(show_unexpected_error));
-                                            },
+                                            () => free_member_connection(member_con).catch(show_unexpected_error),
                                             {
                                                 devices: dev ? [dev] : [],
                                                 fail_text: fmt_to_fragments(_("Removing $0 will break the connection to the server, and will make the administration UI unavailable."), <b>{iface.Name}</b>),
@@ -126,7 +117,7 @@ export const NetworkInterfaceMembers = ({
                                 </Button>}
                             </div>
                         ),
-                        props: { className: "pf-c-table__action" }
+                        props: { className: "pf-v5-c-table__action" }
                     },
                 ],
                 props: {
@@ -168,7 +159,7 @@ export const NetworkInterfaceMembers = ({
                             () => {
                                 return set_member(model, main_connection, main_connection.Settings,
                                                   cs.type, iface.Name, true)
-                                        .fail(show_unexpected_error);
+                                        .catch(show_unexpected_error);
                             },
                             {
                                 devices: iface.Device ? [iface.Device] : [],
@@ -191,23 +182,24 @@ export const NetworkInterfaceMembers = ({
 
     const add_btn = (
         <Dropdown onSelect={() => setIsOpen(false)}
-                  toggle={
-                      <DropdownToggle id="add-member" onToggle={setIsOpen}>
+                  toggle={(toggleRef) => (
+                      <MenuToggle id="add-member" ref={toggleRef} onClick={() => setIsOpen(!isOpen)}>
                           {_("Add member")}
-                      </DropdownToggle>
-                  }
+                      </MenuToggle>
+                  )}
                   isOpen={isOpen}
-                  position="right"
-                  dropdownItems={dropdownItems} />
+                  popperProps={{ position: "right" }}
+        >
+            <DropdownList>
+                {dropdownItems}
+            </DropdownList>
+        </Dropdown>
     );
 
     return (
         <Card id="network-interface-members" className="network-interface-members">
-            <CardHeader>
-                <CardTitle><Text component={TextVariants.h2}>{_("Interface members")}</Text></CardTitle>
-                <CardActions>
-                    {add_btn}
-                </CardActions>
+            <CardHeader actions={{ actions: add_btn }}>
+                <CardTitle component="h2">{_("Interface members")}</CardTitle>
             </CardHeader>
             <ListingTable aria-label={_("Interface members")}
                           className="networking-interface-members"

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,53 +15,44 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from testlib import MachineCase, skipDistroPackage, skipOstree, test_main
+import testlib
 
 
-@skipOstree("OSTree always uses loopback")
-@skipDistroPackage()
-class TestLoopback(MachineCase):
+@testlib.skipWsContainer("cockpit/ws always uses loopback")
+@testlib.nondestructive
+class TestLoopback(testlib.MachineCase):
 
     def testBasic(self):
         b = self.browser
         m = self.machine
 
         # Start Cockpit with option to access SSH
-        m.spawn(f"{self.libexecdir}/cockpit-ws --local-ssh --no-tls", "cockpit-ws")
+        m.stop_cockpit()
+        pid = m.spawn(f"{self.libexecdir}/cockpit-ws --local-ssh --no-tls", "cockpit-ws")
+        self.addCleanup(m.execute, "kill %i" % pid)
         m.wait_for_cockpit_running()
 
         b.login_and_go("/system", user="admin")
         b.logout()
         b.wait_visible("#login")
 
-        m.execute("while B=$(command -v cockpit-bridge); do rm $B; done")
-        b.set_val('#login-user-input', "admin")
-        b.set_val('#login-password-input', "foobar")
-        b.click('#login-button')
-        b.wait_visible('#login-fatal')
-        self.assertIn("no-cockpit", b.text('#login-fatal'))
-
         m.disconnect()
+        self.restore_dir("/etc/ssh", restart_unit=self.sshd_service)
         m.execute("sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config $(ls /etc/ssh/sshd_config.d/* 2>/dev/null || true)")
-        m.execute("( ! systemctl is-active sshd.socket || systemctl stop sshd.socket) && systemctl restart sshd.service")
+        m.execute(self.restart_sshd)
         m.wait_execute()
 
-        b.reload()
-        b.wait_visible("#login")
         b.set_val('#login-user-input', "admin")
         b.set_val('#login-password-input', "foobar")
         b.click('#login-button')
-        b.wait_visible('#login-fatal')
-        self.assertIn(
-            "The server refused to authenticate 'admin' using password authentication, and no other supported authentication methods are available.",
-            b.text('#login-fatal'))
+        b.wait_text("#login-error-title", "Authentication failed")
+        b.wait_text('#login-error-message', "Wrong user name or password")
 
         self.allow_journal_messages("Cannot run program cockpit-bridge: No such file or directory",
                                     ".*server offered unsupported authentication methods: public-key.*")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

@@ -14,44 +14,37 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
-import React, { useState } from 'react';
+import React from 'react';
 
-import { Dropdown, DropdownItem, DropdownSeparator, KebabToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { DropdownItem } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
+import { Divider } from '@patternfly/react-core/dist/esm/components/Divider/index.js';
+import { KebabDropdown } from "cockpit-components-dropdown";
 
 import { delete_group_dialog } from "./delete-group-dialog.js";
 import { rename_group_dialog } from "./rename-group-dialog.jsx";
 
 const _ = cockpit.gettext;
 
-export const GroupActions = ({ group, accounts }) => {
-    const [isKebabOpen, setKebabOpen] = useState(false);
-
+export const GroupActions = ({ group }) => {
     if (!group.isUserCreatedGroup)
         return null;
 
     const actions = [
         <DropdownItem key="rename-group"
-                      onClick={() => { setKebabOpen(false); rename_group_dialog(group.name) }}>
+                      onClick={() => rename_group_dialog(group.name)}>
             {_("Rename group")}
         </DropdownItem>,
-        <DropdownSeparator key="separator" />,
+        <Divider key="separator" />,
         <DropdownItem key="delete-group"
                       className="delete-resource-red"
-                      onClick={() => { setKebabOpen(false); delete_group_dialog(group) }}>
+                      onClick={() => delete_group_dialog(group)}>
             {_("Delete group")}
         </DropdownItem>
     ];
 
-    const kebab = (
-        <Dropdown toggle={<KebabToggle onToggle={setKebabOpen} />}
-                isPlain
-                isOpen={isKebabOpen}
-                position="right"
-                dropdownItems={actions} />
-    );
-    return kebab;
+    return <KebabDropdown dropdownItems={actions} />;
 };

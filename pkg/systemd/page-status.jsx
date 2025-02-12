@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -57,7 +57,7 @@ function get_pficon(name) {
     if (name == "check")
         return <CheckIcon color="green" data-pficon={name} />;
     if (name == "spinner")
-        return <Spinner isSVG size="md" data-pficon={name} />;
+        return <Spinner size="md" data-pficon={name} />;
 
     throw new Error(`get_pficon(): unknown icon name ${name}`);
 }

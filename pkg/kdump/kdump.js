@@ -14,10 +14,10 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import 'polyfills'; // once per application
 import 'cockpit-dark-theme'; // once per page
 
@@ -46,9 +46,12 @@ const initStore = function(rootElement) {
         dataStore.kdumpClient.validateSettings(settings)
                 .then(() => dataStore.kdumpClient.writeSettings(settings));
 
+    dataStore.exportConfig = settings =>
+        dataStore.kdumpClient.exportConfig(settings);
+
     // whether we're actively trying to change the state
     dataStore.stateChanging = false;
-    function setServiceState(desiredState) {
+    function setServiceState(_event, desiredState) {
         if (dataStore.stateChanging) {
             console.log("already trying to change state");
             return;
@@ -56,10 +59,12 @@ const initStore = function(rootElement) {
         const promise = desiredState ? dataStore.kdumpClient.ensureOn() : dataStore.kdumpClient.ensureOff();
         dataStore.stateChanging = true;
         dataStore.render();
-        promise.finally(function() {
-            dataStore.stateChanging = false;
-            dataStore.render();
-        });
+        promise
+                .catch(error => console.warn("Failed to change kdump state:", error))
+                .finally(() => {
+                    dataStore.stateChanging = false;
+                    dataStore.render();
+                });
     }
     const render = function() {
         root.render(<WithDialogs>{React.createElement(KdumpPage, {
@@ -71,6 +76,7 @@ const initStore = function(rootElement) {
             kdumpCmdlineEnabled: dataStore.crashkernel || false,
             onSaveSettings: dataStore.saveSettings,
             onCrashKernel: dataStore.kdumpClient.crashKernel,
+            exportConfig: dataStore.exportConfig,
         })}</WithDialogs>);
     };
     dataStore.render = render;
@@ -93,11 +99,11 @@ const initStore = function(rootElement) {
                 // https://access.redhat.com/solutions/59432 states limit to be 896MiB and the auto at 768MiB max
                 // default unit is MiB
                     if (value >= 1024 * 1024)
-                        dataStore.kdumpMemory = cockpit.format_bytes(value, 1024);
+                        dataStore.kdumpMemory = value;
                     else if (value >= 1024)
-                        dataStore.kdumpMemory = cockpit.format_bytes(value * 1024, 1024);
+                        dataStore.kdumpMemory = value * 1024;
                     else
-                        dataStore.kdumpMemory = cockpit.format_bytes(value * 1024 * 1024, 1024);
+                        dataStore.kdumpMemory = value * 1024 * 1024;
                 } else {
                     dataStore.kdumpMemory = content.trim();
                 }

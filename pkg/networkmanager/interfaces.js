@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 import React from "react";
 import cockpit from 'cockpit';
@@ -404,6 +404,12 @@ export function NetworkManagerModel() {
         subscription = client.subscribe({ }, signal_emitted);
         client.addEventListener("notify", onNotifyEventHandler);
         watch = client.watch({ path_namespace: "/org/freedesktop" });
+        client.addEventListener("owner", (event, owner) => {
+            if (owner) {
+                watch.remove();
+                watch = client.watch({ path_namespace: "/org/freedesktop" });
+            }
+        });
     });
 
     self.close = function close() {
@@ -579,6 +585,17 @@ export function NetworkManagerModel() {
             };
         }
 
+        if (settings.wireguard) {
+            result.wireguard = {
+                listen_port: get("wireguard", "listen-port", 0),
+                peers: get("wireguard", "peers", []).map(peer => ({
+                    publicKey: peer['public-key'].v,
+                    endpoint: peer.endpoint?.v, // endpoint of a peer is optional
+                    allowedIps: peer['allowed-ips']?.v
+                })),
+            };
+        }
+
         return result;
     }
 
@@ -693,6 +710,33 @@ export function NetworkManagerModel() {
         } else
             delete result["802-3-ethernet"];
 
+        if (settings.wireguard) {
+            set("wireguard", "private-key", "s", settings.wireguard.private_key);
+            set("wireguard", "listen-port", "u", settings.wireguard.listen_port);
+            set("wireguard", "peers", "aa{sv}", settings.wireguard.peers.map(peer => {
+                return {
+                    "public-key": {
+                        t: "s",
+                        v: peer.publicKey
+                    },
+                    ...peer.endpoint
+                        ? {
+                            endpoint: {
+                                t: "s",
+                                v: peer.endpoint
+                            }
+                        }
+                        : {},
+                    "allowed-ips": {
+                        t: "as",
+                        v: peer.allowedIps
+                    }
+                };
+            }));
+        } else {
+            delete result.wireguard;
+        }
+
         return result;
     }
 
@@ -714,13 +758,25 @@ export function NetworkManagerModel() {
         case 11: return 'vlan';
         case 12: return 'adsl';
         case 13: return 'bridge';
-        case 14: return 'loopback';
+        case 14: return 'generic';
         case 15: return 'team';
         case 16: return 'tun';
         case 17: return 'ip_tunnel';
         case 18: return 'macvlan';
         case 19: return 'vxlan';
         case 20: return 'veth';
+        case 21: return 'macsec';
+        case 22: return 'dummy';
+        case 23: return 'ppp';
+        case 24: return 'ovs_interface';
+        case 25: return 'ovs_port';
+        case 26: return 'ovs_bridge';
+        case 27: return 'wpan';
+        case 28: return '6lowpan';
+        case 29: return 'wireguard';
+        case 30: return 'wifi_p2p';
+        case 31: return 'vrf';
+        case 32: return 'loopback';
         default: return '';
         }
     }
@@ -792,7 +848,7 @@ export function NetworkManagerModel() {
                     function snarf_prop(line, env, prop) {
                         const prefix = "E: " + env + "=";
                         if (line.indexOf(prefix) === 0) {
-                            props[prop] = line.substr(prefix.length);
+                            props[prop] = line.substring(prefix.length);
                         }
                     }
                     res.split('\n').forEach(function(line) {
@@ -1282,7 +1338,8 @@ export function syn_click(model, fun) {
 }
 
 export function is_managed(dev) {
-    return dev.State != 10;
+    // Never let the user manage loopback devices, nothing good can come from that.
+    return dev.State != 10 && dev.DeviceType != "loopback" && dev.Interface != "lo";
 }
 
 function render_interface_link(iface) {
@@ -1398,7 +1455,7 @@ export function settings_applier(model, device, connection) {
         } else if (device) {
             return device.activate_with_settings(settings);
         } else {
-            cockpit.warn("No way to apply settings", connection, settings);
+            console.warn("No way to apply settings", connection, settings);
             return Promise.resolve();
         }
     };
@@ -1617,32 +1674,8 @@ export function is_interesting_interface(iface) {
     return !iface.Device || is_managed(iface.Device);
 }
 
-export function array_find(array, predicate) {
-    if (array === null || array === undefined) {
-        throw new TypeError('Array.prototype.find called on null or undefined');
-    }
-    if (typeof predicate !== 'function') {
-        throw new TypeError('predicate must be a function');
-    }
-    const list = Object(array);
-    const length = list.length >>> 0;
-    const thisArg = arguments[1];
-
-    for (let i = 0; i < length; i++) {
-        if (i in list) {
-            const value = list[i];
-            if (predicate.call(thisArg, value, i, list)) {
-                return value;
-            }
-        }
-    }
-    return undefined;
-}
-
 export function member_connection_for_interface(group, iface) {
-    return group && array_find(group.Members, function (s) {
-        return is_interface_connection(iface, s);
-    });
+    return group?.Members.find(s => is_interface_connection(iface, s));
 }
 
 export function member_interface_choices(model, group) {

@@ -1,7 +1,8 @@
 # Integration Tests of Cockpit
 
-This directory contains automated integration tests for Cockpit, and the support
-files for them.
+This directory contains automated integration tests for Cockpit, and the
+support files for them. The architecture of the automated integration tests is
+described in [ARCHITECTURE](./ARCHITECTURE.md)
 
 To run the tests on Fedora, refer to the [HACKING](../HACKING.md) guide for
 installation of all of the necessary build and test dependencies. There's
@@ -21,8 +22,12 @@ You first need to build cockpit, and install it into a VM:
 
     test/image-prepare
 
-This uses the default OS image, which is currently Fedora 37. See `$TEST_OS`
-below how to select a different one.
+This uses the default OS image. See `$TEST_OS` below how to select a different one.
+
+See `test/image-prepare --help` for some special modes, like skipping unit
+tests, building overlays, or preparing an image with the
+[cockpit/ws container](https://quay.io/repository/cockpit/ws) instead of RPMs.
+See our scenarios in [test/run](./run) for how they are being used.
 
 In most cases you want to run an individual test in a suite, for example:
 
@@ -82,85 +87,190 @@ Once the machine is booted and the cockpit socket has been activated, a
 message will be printed describing how to access the virtual machine, via
 ssh and web.  See the "Helpful tips" section below.
 
+To login using the web client you have to use the username and password listed below. If you wish to enable `root` login using the web you can remove `root` from `/etc/cockpit/disallowed-users`.
+
+- Username: `admin`
+- Password: `foobar`
+
+By default, it's only possible to contact the virtual machine from the host
+machine on which it's running.   If you want to conduct manual testing from
+other devices on your network, set `TEST_BIND_GLOBAL=1`, for example:
+
+     TEST_BIND_GLOBAL=1 bots/vm-run -s cockpit.socket debian-stable
+
+This will bind the Cockpit and SSH ports to all interfaces, making it possible
+to access a URL like http://yourhost.local:9091/ to test Cockpit from another
+machine on your LAN.
+
 ## Pixel tests
 
-The verify test suite contains ["pixel tests"](https://cockpit-project.org/blog/pixel-testing.html).
-Make sure to create the test/reference submodule before running tests which contain pixel tests.
+Pixel tests in Cockpit ensure that updates of our dependencies or code changes
+don't break the UI: for example slight changes of layout, padding, color and
+everything which isn't easily spotted by a human. They also give us confidence
+that an update of our UI Framework doesn't introduce changes in how Cockpit
+looks.
 
- * test/common/pixel-tests pull
+Pixel tests make a screenshot of a selector and compare it to a known good
+reference image. if there is a difference, the test fails and a pixel
+difference is shown.
+
+This works as our tests run in the [cockpit/tasks container](https://ghcr.io/cockpit-project/tasks)
+which pins the browser and font rendering so repeated runs provide the same
+pixels. To generate new pixels, this tasks container must be used; your own
+browser and font rendering software might generate different results. For more
+information read the ["introduction blog post"](https://cockpit-project.org/blog/pixel-testing.html).
+
+The test images are stored in a git submodule in the `test/reference` directory
+and be fetched with:
+
+```sh
+./test/common/pixel-tests update
+```
+
+As Cockpit tests under multiple distributions and it is not worth the effort to
+run pixel tests on every supported distribution we only run them for the
+image configured in `test/reference-image`.
+
+Our tests call `Browser.assert_pixels` at interesting and strategic places.
+This assertion method requires at least a CSS selector and an image title.
+Pixel tests are generated in five layouts by default: desktop, medium, mobile,
+dark and rtl.
+
+Take a screenshot of the content in `#detail-content`:
+```python
+browser.assert_pixels("#detail-content", "filesystem")
+```
+
+Take a screenshot of the content in `#detail-content` and ignore all elements
+with a class `disk-stats` as they change per test run:
+```python
+browser.assert_pixels("#detail-content", "filesystem", ignore=[".disks-stats"])
+```
+
+Take a screenshot of the content in `#detail-content` and skip it for a
+specific layout as it generates unstable pixels:
+```python
+browser.assert_pixels("#detail-content", "filesystem", skip_layouts=["rtl"])
+```
+
+To update pixel tests, locally run the test in the current tasks container, or
+create a draft PR and let the tests run for `test/reference-image` and
+afterwards fetch the new pixels:
+
+```
+./test/common/pixel-tests fetch "https://cockpit-logs.us-east-1.linodeobjects.com/<snip>/log.html"
+```
+
+Finally, upload the new pixel tests and commit the newly generated submodule commit:
+```
+./test/common/pixel-tests push
+```
+
+**Note** that you have to a part of the [Contributors group](https://github.com/orgs/cockpit-project/teams/contributors)
+to push pixel tests.
 
 ## Test Configuration
 
 You can set these environment variables to configure the test suite:
 
-    TEST_OS    The OS to run the tests in.  Currently supported values:
-                  "centos-8-stream"
-                  "debian-stable"
-                  "debian-testing"
-                  "fedora-36"
-                  "fedora-37"
-                  "fedora-coreos"
-                  "fedora-testing"
-                  "rhel-8-7"
-                  "rhel-8-7-distropkg"
-                  "rhel-9-1"
-                  "rhel4edge",
-                  "ubuntu-2204"
-                  "ubuntu-stable"
-               "fedora-37" is the default (TEST_OS_DEFAULT in bots/lib/constants.py)
+ * `TEST_OS`: The OS to run the tests in, like "fedora-coreos" or
+    "debian-stable". See the "cockpit-project/cockpit" section in the
+    [test map](https://github.com/cockpit-project/bots/blob/main/lib/testmap.py)
+    for all supported values. "fedora-40" is the default (`TEST_OS_DEFAULT` in
+    bots' [constants.py](https://github.com/cockpit-project/bots/blob/main/lib/constants.py)).
 
-    TEST_JOBS  How many tests to run in parallel.  The default is 1.
+ * `TEST_JOBS`:  How many tests to run in parallel.  The default is 1.
 
-    TEST_CDP_PORT  Attach to an actually running browser that is compatible with
-                   the Chrome Debug Protocol, on the given port. Don't use this
-                   with parallel tests.
+ * `TEST_BROWSER`: What browser should be used for testing. Currently supported
+   values are "chromium" and "firefox". "chromium" is the default.
 
-    TEST_BROWSER  What browser should be used for testing. Currently supported values:
-                     "chromium"
-                     "firefox"
-                  "chromium" is the default.
+ * `TEST_SHOW_BROWSER`: Set to run browser interactively. When not specified,
+   browser is run in headless mode. When set to "pixels", the browser will be
+   resized to the exact dimensions that are used for pixel tests.
 
-    TEST_SHOW_BROWSER  Set to run browser interactively. When not specified,
-                       browser is run in headless mode. When set to "pixels",
-                       the browser will be resized to the exact dimensions that
-                       are used for pixel tests.
-
-    TEST_TIMEOUT_FACTOR Scale normal timeouts by given integer. Useful for
-                        slow/busy testbeds or architectures.
+ * `TEST_TIMEOUT_FACTOR`: Scale normal timeouts by given integer. Useful for
+   slow/busy testbeds or architectures.
 
 See the [bots documentation](https://github.com/cockpit-project/bots/blob/main/README.md)
 for details about the tools and configuration for these.
 
-## Faster iteration
+## Convenient test VM SSH access
+
+It is recommended to add a snippet like this to your `~/.ssh/config`. Then
+you can log in to test machines without authentication:
+
+    Match final host 127.0.0.2
+        User root
+        StrictHostKeyChecking no
+        UserKnownHostsFile /dev/null
+        CheckHostIp no
+        IdentityFile CHECKOUT_DIR/bots/machine/identity
+        IdentitiesOnly yes
+
+You need to replace `CHECKOUT_DIR` with the actual directory where you cloned
+`cockpit.git`, or `bots.git` if you have a separate clone for that.
+
+Many cockpit developers take it a step further, and add an alias to
+allow typing `ssh c`:
+
+    Host c
+        Hostname 127.0.0.2
+        Port 2201
+
+The `final` keyword in the first rule will cause it to be checked (and matched)
+after the `Hostname` substitution in the `c` rule.
+
+## Fast develop/test iteration
 
 Each `image-prepare` invocation will always start from the pristine image and
 ignore the current overlay in `test/images`. It is thorough, but also rather
-slow. If you want to iterate on changing only JavaScript/HTML code, you can use
-this shortcut to copy updated bundles into a prepared VM overlay image:
+slow. If you want to iterate on changing only JavaScript/HTML code, as opposed
+to the bridge or webserver, the whole build and test cycle can be done much
+faster.
 
-    make && bots/image-customize -u dist:/usr/share/cockpit/ $TEST_OS
+You always need to do at least one initial `test/image-prepare $TEST_OS` run.
+Afterwards it depends on the kind of test you want to run.
+
+### Nondestructive tests
+
+Many test methods or classes are marked as `@nondestructive`, meaning that
+they restore the state of the test VM enough that other tests can run
+afterwards. This is the fastest and most convenient situation for both
+iterating on the code and debugging failing tests.
+
+Start the prepared VM with `bots/vm-run $TEST_OS`. Note the SSH and cockpit
+ports. If this is the only running VM, it will have the ports in the
+examples below, otherwise the port will be different.
+
+Then start building the page you are working on
+[in watch and rsync mode](../HACKING.md#working-on-cockpits-session-pages), e.g.
+
+    RSYNC=c ./build.js -w users
+
+(Assuming the `c` SSH alias from the previous section and first running VM).
+
+Then you can run a corresponding test against the running VM, with additional
+debug output:
+
+    TEST_OS=... test/verify/check-users -t --machine 127.0.0.2:2201 --browser 127.0.0.2:9091 TestAccounts.testBasic
+
+### Destructive tests
+
+Other tests need one or more fresh VMs. Instead of a full `test/image-prepare`
+run (which is slow), you can update the existing VM overlay with updated
+bundles. Start the build in watch mode, but without rsyncing, e.g.
+
+    ./build.js -w storaged
+
+and after each iteration, copy the new bundles into the VM overlay:
+
+    bots/image-customize -u dist:/usr/share/cockpit/ $TEST_OS
+
+Then run the test as you would normally do, e.g.
+
+    TEST_OS=... test/verify/check-storage-stratis -t TestStorageStratis.testBasic
 
 Use `bots/vm-reset` to clean up all prepared overlays in `test/images`.
-
-Many of the verify tests can also be run against an already running
-machine. Although be aware that lots of the tests change state on
-the target machine -- so only do this with the ones marked with
-`@nondestructive`.
-
-    test/verify/check-connection --machine=10.1.1.2 --browser 10.1.1.2:9090
-
-In particular, you can use our standard test VMs with this mode:
-
-    test/image-prepare
-    bots/vm-run fedora-37
-
-Note the SSH and cockpit ports. If this is the only running VM, it will have
-the addresses in the example below, otherwise the port will be different.
-
-Now you can change the code (see [HACKING.md](../HACKING.md) for watch
-mode), copy it into the VM, and run the test against it:
-
-    test/verify/check-connection --machine 127.0.0.2:2201 --browser 127.0.0.2:9091
 
 ## Debugging tests
 
@@ -201,28 +311,32 @@ each section returns the machine to more or less the state that it was
 in before the section.  This makes it easier to run these sections
 ad-hoc when doing incremental development.
 
+## Coverage
+
+Every pull request will trigger a `$DEFAULT_OS/devel` scenario which creates a
+coverage report of the JavaScript code executed and writes comments about
+uncovered code in the pull request. The overall coverage percentage is recorded
+in prometheus for a subset of our projects and [visualized in Grafana](https://grafana-cockpit.apps.ocp.cloud.ci.centos.org/d/ci/cockpit-ci?orgId=1).
+
+To generate coverage locally for `TestApps`:
+
+```
+export NODE_ENV=devel
+./build.js
+./test/image-prepare -q
+./test/common/run-tests --test-dir test/verify --coverage TestApps
+```
+
+Code which is impossible or very hard to test in our tests can be excluded from
+appearing in a pull request as comment by adding a `not-covered` comment with a
+short justification:
+
+```javascript
+return cockpit.script(data, { superuser: "try", err: "message" })
+              .catch(console.error); // not-covered: OS error
+```
+
 ## Helpful tips
-
-If you add a snippet like this to your `~/.ssh/config` then you'll be able to
-log in to test machines without authentication:
-
-    Match final host 127.0.0.2
-        User root
-        StrictHostKeyChecking no
-        UserKnownHostsFile /dev/null
-        CheckHostIp no
-        IdentityFile ~/src/cockpit/bots/machine/identity
-        IdentitiesOnly yes
-
-Many cockpit developers take it a step further, and add an alias to
-allow typing `ssh c`:
-
-    Host c
-        Hostname 127.0.0.2
-        Port 2201
-
-The `final` keyword in the first rule will cause it to be checked (and matched)
-after the `Hostname` substitution in the `c` rule.
 
 For web access, if you'd like to avoid Chromium (or Chrome) prompting
 about certificate errors while connecting to localhost, you can change

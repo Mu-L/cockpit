@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -200,20 +200,22 @@ journal.journalctl = function journalctl(/* ... */) {
     };
     promise.stop = function stop() {
         streamers = [];
+        promise.stopped = true;
         proc.close("cancelled");
     };
     return promise;
 };
 
-journal.printable = function printable(value) {
+journal.printable = function printable(value, key) {
     if (value === undefined || value === null)
         return _("[no data]");
     else if (typeof (value) == "string")
         return value;
-    else if (value.length !== undefined)
-        return cockpit.format(_("[$0 bytes of binary data]"), value.length);
-    else
+    else if (value.length !== undefined && value.length <= 1000 && key == "MESSAGE")
+        return new TextDecoder().decode(new Uint8Array(value));
+    else {
         return _("[binary data]");
+    }
 };
 
 /* Render the journal entries by passing suitable DOM elements back to
@@ -300,7 +302,7 @@ journal.renderer = function renderer(output_funcs) {
             bootid: journal_entry._BOOT_ID,
             ident: journal_entry.SYSLOG_IDENTIFIER || journal_entry._COMM,
             prio: journal_entry.PRIORITY,
-            message: journal.printable(journal_entry.MESSAGE)
+            message: journal.printable(journal_entry.MESSAGE, "MESSAGE")
         };
     }
 

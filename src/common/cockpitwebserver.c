@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -657,21 +657,6 @@ cockpit_web_server_start (CockpitWebServer *self)
   g_socket_service_start (self->socket_service);
 }
 
-GIOStream *
-cockpit_web_server_connect (CockpitWebServer *self)
-{
-  g_return_val_if_fail (COCKPIT_IS_WEB_SERVER (self), NULL);
-
-  g_autoptr(GIOStream) server = NULL;
-  g_autoptr(GIOStream) client = NULL;
-
-  cockpit_socket_streampair (&client, &server);
-
-  cockpit_web_request_start (self, server, TRUE);
-
-  return g_steal_pointer (&client);
-}
-
 /* ---------------------------------------------------------------------------------------------------- */
 
 void
@@ -742,43 +727,23 @@ cockpit_web_request_process_delayed_reply (CockpitWebRequest *self,
                                            const gchar *path,
                                            GHashTable *headers)
 {
-  CockpitWebResponse *response;
-  const gchar *host;
-  const gchar *body;
-  GBytes *bytes;
-  gsize length;
-  gchar *url;
-
   g_assert (self->delayed_reply > 299);
 
-  response = cockpit_web_request_respond (self);
+  g_autoptr(CockpitWebResponse) response = cockpit_web_request_respond (self);
   g_signal_connect_data (response, "done", G_CALLBACK (on_web_response_done),
                          g_object_ref (self->web_server), (GClosureNotify)g_object_unref, 0);
 
   if (self->delayed_reply == 301)
     {
-      body = "<html><head><title>Moved</title></head>"
-        "<body>Please use TLS</body></html>";
-      host = g_hash_table_lookup (headers, "Host");
-      url = g_strdup_printf ("https://%s%s",
-                             host != NULL ? host : "", path);
-      length = strlen (body);
-      cockpit_web_response_headers (response, 301, "Moved Permanently", length,
-                                    "Content-Type", "text/html",
-                                    "Location", url,
-                                    NULL);
-      g_free (url);
-      bytes = g_bytes_new_static (body, length);
-      if (cockpit_web_response_queue (response, bytes))
-        cockpit_web_response_complete (response);
-      g_bytes_unref (bytes);
+      const gchar *host = g_hash_table_lookup (headers, "Host");
+      g_autofree gchar *url = g_strdup_printf ("https://%s%s", host != NULL ? host : "", path);
+      cockpit_web_response_headers (response, 301, "Moved Permanently", 0, "Location", url, NULL);
+      cockpit_web_response_complete (response);
     }
   else
     {
       cockpit_web_response_error (response, self->delayed_reply, NULL, NULL);
     }
-
-  g_object_unref (response);
 }
 
 static gboolean
@@ -834,6 +799,8 @@ cockpit_web_request_process (CockpitWebRequest *self,
         }
     }
 
+  self->method = method;
+
   if (self->delayed_reply)
     {
       cockpit_web_request_process_delayed_reply (self, path, headers);
@@ -844,7 +811,6 @@ cockpit_web_request_process (CockpitWebRequest *self,
 
   self->original_path = path_copy;
   self->path = path_copy + self->web_server->url_root->len;
-  self->method = method;
   self->headers = headers;
   self->host = host;
 
@@ -1288,13 +1254,7 @@ CockpitWebResponse *
 cockpit_web_request_respond (CockpitWebRequest *self)
 {
   return cockpit_web_response_new (self->io, self->original_path, self->path, self->headers,
-                                   cockpit_web_request_get_protocol (self));
-}
-
-const gchar *
-cockpit_web_request_get_original_path (CockpitWebRequest *self)
-{
-  return self->original_path;
+                                   self->method, cockpit_web_request_get_protocol (self));
 }
 
 const gchar *
@@ -1440,17 +1400,3 @@ cockpit_web_request_get_client_certificate (CockpitWebRequest *self)
   cockpit_json_get_string (metadata, "client-certificate", NULL, &client_certificate);
   return client_certificate;
 }
-
-gboolean
-cockpit_web_request_accepts_encoding (CockpitWebRequest *self,
-                                      const gchar *encoding)
-{
-  const gchar *accept = g_hash_table_lookup (self->headers, "Accept-Encoding");
-  if (!accept)
-    return TRUE;
-  g_auto(GStrv) encodings = cockpit_web_server_parse_accept_list (accept, NULL);
-  return g_strv_contains ((const gchar **) encodings, encoding) ||
-         g_strv_contains ((const gchar **) encodings, "*");
-}
-
-/* ---------------------------------------------------------------------------------------------------- */

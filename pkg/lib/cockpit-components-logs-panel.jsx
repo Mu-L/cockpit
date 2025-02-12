@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -22,7 +22,7 @@ import React from "react";
 
 import { Badge } from "@patternfly/react-core/dist/esm/components/Badge/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { ExclamationTriangleIcon, TimesCircleIcon } from '@patternfly/react-icons';
 
 import { journal } from "journal";
@@ -55,7 +55,7 @@ export class JournalOutput {
         }
 
         // only consider enter button for keyboard events
-        if (ev.type === 'keypress' && ev.key !== "Enter")
+        if (ev.type === 'KeyDown' && ev.key !== "Enter")
             return;
 
         cockpit.jump("system/logs#/" + cursor + "?parent_options=" + JSON.stringify(this.search_options));
@@ -75,17 +75,17 @@ export class JournalOutput {
         const full_content = [time, message, ident].join("\n");
 
         return (
-            <div className="cockpit-logline" role="row" tabIndex="0" key={entry.__CURSOR}
+            <div className="cockpit-logline" role="row" tabIndex={0} key={entry.__CURSOR}
                 data-cursor={entry.__CURSOR}
                 onClick={ev => this.onEvent(ev, entry.__CURSOR, full_content)}
-                onKeyPress={ev => this.onEvent(ev, entry.__CURSOR, full_content)}>
+                onKeyDown={ev => this.onEvent(ev, entry.__CURSOR, full_content)}>
                 <div className="cockpit-log-warning" role="cell">
                     { warning
-                        ? <ExclamationTriangleIcon className="ct-icon-exclamation-triangle" size="sm" />
+                        ? <ExclamationTriangleIcon className="ct-icon-exclamation-triangle" />
                         : null
                     }
                     { problem
-                        ? <TimesCircleIcon className="ct-icon-times-circle" size="sm" />
+                        ? <TimesCircleIcon className="ct-icon-times-circle" />
                         : null
                     }
                 </div>
@@ -95,7 +95,7 @@ export class JournalOutput {
                     count > 1
                         ? <div className="cockpit-log-service-container" role="cell">
                             <div className="cockpit-log-service-reduced">{ident}</div>
-                            <Badge isRead key={count}>{count}</Badge>
+                            <Badge screenReaderText={_("Occurrences")} isRead key={count}>{count}</Badge>
                         </div>
                         : <div className="cockpit-log-service" role="cell">{ident}</div>
                 }
@@ -166,11 +166,12 @@ export class LogsPanel extends React.Component {
     }
 
     render() {
+        const actions = (this.state.logs.length > 0 && this.props.goto_url) && <Button variant="secondary" onClick={e => cockpit.jump(this.props.goto_url)}>{_("View all logs")}</Button>;
+
         return (
             <Card className="cockpit-log-panel">
-                <CardHeader>
+                <CardHeader actions={{ actions }}>
                     <CardTitle>{this.props.title}</CardTitle>
-                    { (this.state.logs.length > 0 && this.props.goto_url) && <CardActions><Button variant="secondary" onClick={e => cockpit.jump(this.props.goto_url)}>{_("View all logs")}</Button></CardActions>}
                 </CardHeader>
                 <CardBody className={(!this.state.logs.length && this.props.emptyMessage.length) ? "empty-message" : "contains-list"}>
                     { this.state.logs.length ? this.state.logs : this.props.emptyMessage }

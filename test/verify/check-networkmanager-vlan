@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,16 +15,14 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from netlib import NetworkCase
-from testlib import nondestructive, skipDistroPackage, test_main
+import netlib
+import testlib
 
 
-@nondestructive
-@skipDistroPackage()
-class TestNetworkingVLAN(NetworkCase):
+@testlib.nondestructive
+class TestNetworkingVLAN(netlib.NetworkCase):
     def testVlan(self):
         b = self.browser
         m = self.machine
@@ -41,16 +39,16 @@ class TestNetworkingVLAN(NetworkCase):
         b.wait_visible("#network-vlan-settings-dialog")
 
         # wait until dialog initialized
-        b.wait_visible("#network-vlan-settings-dialog > button[aria-label=Close]")
+        b.wait_visible("#network-vlan-settings-dialog button[aria-label=Close]")
         # Remove focus ring around the close button, which causes pixel tests retries.
-        b.blur("#network-vlan-settings-dialog > button[aria-label=Close]")
+        b.blur("#network-vlan-settings-dialog button[aria-label=Close]")
         b.wait_visible("#network-vlan-settings-interface-name-input")
         b.assert_pixels("#network-vlan-settings-dialog", "networking-vlan-settings-dialog")
 
         b.select_from_dropdown("#network-vlan-settings-parent-select", iface)
         b.set_input_text("#network-vlan-settings-interface-name-input", "tvlan")
         b.set_input_text("#network-vlan-settings-vlan-id-input", "123")
-        b.click("#network-vlan-settings-dialog button:contains('Save')")
+        b.click("#network-vlan-settings-dialog button:contains('Add')")
         b.wait_not_present("#network-vlan-settings-dialog")
         b.wait_visible("#networking-interfaces tr[data-interface='tvlan']")
 
@@ -70,4 +68,4 @@ class TestNetworkingVLAN(NetworkCase):
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

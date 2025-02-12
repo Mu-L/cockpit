@@ -8,9 +8,16 @@ Start by getting the code:
 The remainder of the commands assume you're in the top level of the
 Cockpit git repository checkout.
 
+**Do not clone a fork!** This will not work for various reasons (missing tags,
+determining version, integration with bots commands). Please keep `origin` as
+the read-only actual upstream project, and add your fork as a separate writable
+remote, for example with
+
+    git remote add my git@github.com:yourgithubid/cockpit.git
+
 ## Setting up development container
 
-The cockpit team maintains a [cockpit/tasks container](https://quay.io/repository/cockpit/tasks)
+The cockpit team maintains a [cockpit/tasks container](https://ghcr.io/cockpit-project/tasks)
 for both local development and CI. If you can install [toolbx](https://containertoolbx.org/) or
 [distrobox](https://distrobox.privatedns.org/) on your system, it is highly
 recommended to do that:
@@ -31,7 +38,7 @@ recommended to do that:
 
 2. Create a development toolbox for Cockpit
 
-       toolbox create --image quay.io/cockpit/tasks -c cockpit
+       toolbox create --image ghcr.io/cockpit-project/tasks -c cockpit
 
 3. Enter the toolbox:
 
@@ -45,7 +52,7 @@ toolbox container. If desired, you can install additional packages with
 The Cockpit team occasionally refreshes the `tasks` container image.
 To re-create your development container from the latest image, run:
 
-    podman pull quay.io/cockpit/tasks
+    podman pull ghcr.io/cockpit-project/tasks
     toolbox rm cockpit
 
 ...and then repeat steps 2 and 3 from above.
@@ -53,9 +60,14 @@ To re-create your development container from the latest image, run:
 ## Working on Cockpit's session pages
 
 Most contributors want to work on the web (HTML, JavaScript, CSS) parts of Cockpit.
+
+### Install Cockpit
+
 First, install Cockpit on your local machine as described in:
 
 <https://cockpit-project.org/running.html>
+
+### Build session pages
 
 Next, run this command from your top level Cockpit checkout directory, and make
 sure to run it as the same user that you'll use to log into Cockpit below.
@@ -63,19 +75,12 @@ sure to run it as the same user that you'll use to log into Cockpit below.
     mkdir -p ~/.local/share/
     ln -s $(pwd)/dist ~/.local/share/cockpit
 
-This will cause cockpit to read JavaScript, HTML, and CSS files directly from the
+This will cause Cockpit to read JavaScript, HTML, and CSS files directly from the
 locally built package output directory instead of using the system-installed Cockpit
 files.
 
-Now you can log into Cockpit on your local Linux machine at the following
-address. Use the same user and password that you used to log into your Linux
-desktop.
-
-<http://localhost:9090>
-
-After every change to the source files, bundles need to be rebuilt. The
-recommended and fastest way is to do that is using the "watch" mode (`-w` or
-`--watch`) on the page that you are working on. For example, if you want to
+The recommended way to build bundles is to use the "watch" mode
+(`-w` or`--watch`) on the page you are working on. For example, if you want to
 work on anything in [pkg/systemd](./pkg/systemd/), run:
 
     ./build.js -w systemd
@@ -87,27 +92,34 @@ pkg/lib/), you can also build all pages:
 
     ./build.js -w
 
-Note that this enables eslint and stylelint by default -- if you want to
-disable them, run it with `-e`/`--no-eslint` and/or `-s`/`--no-stylelint`.
+Now you can log into Cockpit on your local Linux machine at the following
+address, using the same username and password as your desktop login:
 
-Reload cockpit in your browser after page is built. Press `Ctrl`-`C` to
-stop watch mode once you are done with changing the code.
+<http://localhost:9090>
 
-You often need to test code changes in a VM. There is an `-r`/`--rsync`
-option for copying the built page into the given SSH target's
-/usr/share/cockpit/ directory. If you use Cockpit's own test VMs and set up the
+Watch mode automatically rebuilds when source files are modified. Once it
+finishes building, refresh your browser to see the changes in Cockpit.
+Press `Ctrl-C` to stop watch mode when you are done changing the code.
+
+### Testing
+
+You often need to test code changes in a VM. You can set the `$RSYNC` env
+variable to copy the built page into the given SSH target's
+/usr/local/share/cockpit/ directory. If you use Cockpit's own test VMs and set up the
 SSH `c` alias as described in [test/README.md](./test/README.md), you can use
 one of these commands:
 
-    ./build.js -w -r c kdump
-    ./build.js -w -r c
+    RSYNC=c ./build.js -w kdump
+    RSYNC=c ./build.js -w
+
+### Returning to system packages
 
 To make Cockpit use system packages again, instead of your checkout directory,
 remove the symlink with the following command and log back into Cockpit:
 
     rm ~/.local/share/cockpit
 
-## Working on the non-web parts of Cockpit
+## Building and unit tests
 
 Cockpit uses autotools, so there are familiar `./configure` script and
 Makefile targets.
@@ -145,21 +157,37 @@ which will output a URL to connect to with a browser, such as
 <http://localhost:8765/qunit/base1/test-dbus.html>. Adjust the path for different
 tests and inspect the results there.
 
-You can also run individual tests by specifying the `TESTS` environment
-variable:
+QUnit tests are run as part of a pytest test called `test_browser`.  You can
+run individual tests via `pytest -k`, like so:
 
-    make check TESTS=qunit/base1/test-chan.html
+    pytest -k test-fsinfo.html
+
+You can see JavaScript code coverage information for QUnit tests.  For a
+summary table:
+
+    pytest -k test_browser --js-cov
+
+And for detailed output on uncovered sections in a specific file, something
+like:
+
+    pytest -k test-fsinfo.html --js-cov-files='*/fsinfo.ts'
+
+Coverage information is gathered into the pytest tmpdir, regardless of which
+coverage-related commandline flags are given, so it's also possible to drill
+down after the fact — without re-running tests — using something like:
+
+    test/common/js_coverage.py -m '*/fsinfo.ts' /tmp/pytest-of-*/pytest-current/js-coverage/*
 
 There are also static code and syntax checks which you should run often:
 
-    test/static-code
+    test/common/static-code
 
 It is highly recommended to set up a git pre-push hook, to avoid pushing PRs
 that will fail on trivial errors:
 
     ln -s ../../tools/git-hook-pre-push .git/hooks/pre-push
 
-This calls `test/static-code` for each commit you're trying to push.
+This calls `test/common/static-code` for each commit you're trying to push.
 
 You can also set up a post-commit hook to do the same, after each commit:
 
@@ -175,16 +203,47 @@ git submodules:
 Refer to the [testing README](test/README.md) for details on running the Cockpit
 integration tests locally.
 
-## Testing the Python bridge
+## Bridge
 
-Cockpit currently has an experimental replacement for `cockpit-bridge`
-written in Python.  It resides in `src/cockpit` with most of its rules in
-`src/Makefile.am`.  This directory was chosen because it matches the standard
-so-called "src layout" convention for Python packages, where each package
-(`cockpit`) is a subdirectory of the `src` directory.
+The Cockpit bridge is the initial program launched in a Cockpit Linux session:
+Its stdin/out is connected to the web socket (and thus to JavaScript in the
+[pages](pkg/)), where it speaks a [JSON protocol](doc/protocol.md) that
+multiplexes "channels" -- abstractions of operating system APIs that the pages
+use to implement their functionality. This protocol is translated into
+operating system calls such as opening or writing files, D-Bus calls, or HTTP
+queries. Think of the bridge as the moral equivalent of "bash" in a human SSH
+session.
 
-There are a growing number of Python `unittest` tests being written to test
-parts of the new bridge code.  You can run these with `make pytest` or
+The bridge resides in `src/cockpit` with most of its rules in `src/Makefile.am`.
+This directory was chosen because it matches the standard so-called "src
+layout" convention for Python packages, where each package (`cockpit`) is a
+subdirectory of the `src` directory.
+
+### Running the bridge
+
+The bridge can be used interactively on a local machine out of the source tree:
+
+    PYTHONPATH=src python3 -m cockpit.bridge
+
+To make it easy to test out channels without having to write out messages
+manually, `cockpit.misc.print` can be used:
+
+    PYTHONPATH=src python3 -m cockpit.misc.print open fsinfo path=/etc 'attrs=["type", "entries"]' | PYTHONPATH=src python3 -m cockpit.bridge
+
+These shell aliases might be useful when experimenting with the protocol:
+
+    alias cpy='PYTHONPATH=src python3 -m cockpit.bridge'
+    alias cpf='PYTHONPATH=src python3 -m cockpit.misc.print'
+
+To enable debug logging in journal on a test image, you can pass `--debug` to
+`image-prepare`. This will set `COCKPIT_DEBUG=all` to `/etc/environment`, if
+you are only interested channel debug messages change `all` to
+`cockpit.channel`.
+
+### Testing the bridge
+
+There are a growing number of [pytest](https://docs.pytest.org) tests being written to test
+the bridge code.  You can run these with `make pytest` or
 `make pytest-cov`.  Those are both just rules to make sure that the
 `systemd_ctypes` submodule is checked out before running `pytest` from the
 source directory.
@@ -196,7 +255,7 @@ The tests require at least `pytest` 7.0.0 or higher to run.
 Cockpit uses [ESLint](https://eslint.org/) to automatically check JavaScript
 code style in `.js` and `.jsx` files.
 
-The linter is executed on every build.
+The linter is executed as part of `test/common/static-code`.
 
 For developer convenience, the ESLint can be started explicitly by:
 
@@ -218,11 +277,14 @@ unused identifiers, and other JavaScript-related issues.
 Cockpit uses [Stylelint](https://stylelint.io/) to automatically check CSS code
 style in `.css` and `.scss` files.
 
-The linter is executed on every build.
+The linter is executed as part of `test/common/static-code`.
 
 For developer convenience, the Stylelint can be started explicitly by:
 
     npm run stylelint
+
+But note that this only covers files in `pkg/`. `test/common/static-code` covers
+*all* (S)CSS files tracked in git.
 
 Some rule violations can be automatically fixed by running:
 
@@ -234,10 +296,39 @@ During fast iterative development, you can also choose to not run stylelint, by
 running `./build.js` with the `-s`/`--no-stylelint` option. This speeds up the
 build and avoids build failures due to ill-formatted CSS or other issues.
 
+## Working on your local machine: systemd-sysext
+
+If you want to safely test your local changes directly on it, Cockpit supports
+installation as a [systemd-sysext](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html).
+This covers all parts of Cockpit (ws, tls, session, bridge, login page, systemd
+units, PAM configuration, and the session pages) except for the SELinux policy.
+It gets installed into `/run/extensions/`, so nothing ever hits the disk and
+this also works on read-only installations (CoreOS, OSTree, bootc).
+
+Just run:
+
+    tools/make-sysext
+
+This runs `./autogen.sh` if necessary, and then just re-`make`s your tree,
+re-installs it into `/run/extensions`, and reloads the sysext in systemd.
+Afterwards you can connect to http://localhost:9090 as usual.
+
+To remove this, reboot or run
+
+    tools/make-sysext stop
+
+**Attention**: This is not currently compatible with SELinux in enforcing mode.
+If you have that, you need to disable it:
+
+    sudo setenforce 0
+
 ## Working on your local machine: Web server
 
-To test changes to the login page or any other resources, you can bind-mount the
-build tree's `dist/static/` directory over the system one:
+If the above systemd-sysext approach does not work for you, you can also test
+changes with some bind mounts.
+
+To test changes to the login page, you can bind-mount the build tree's
+`dist/static/` directory over the system one:
 
     sudo mount -o bind dist/static/ /usr/share/cockpit/static/
 
@@ -339,13 +430,17 @@ A local cache is maintained in `~/.cache/cockpit-dev`.
 Make a pull request on github.com with your change. All changes get reviewed,
 tested, and iterated on before getting into Cockpit. The general workflow is
 described in the [wiki](https://github.com/cockpit-project/cockpit/wiki/Workflow).
-Don't feel bad if there's multiple steps back and forth asking for changes or
-tweaks before your change gets in.
 
 You need to be familiar with git to contribute a change. Do your changes
 on a branch. Your change should be one or more git commits that each contain one
 single logical simple reviewable change, without modifications that are
 unrelated to the commit message.
+
+Don't feel bad if there's multiple steps back and forth asking for changes or
+tweaks before your change gets in. If you fix your commits after getting a
+review, just force-push to your branch -- this will update the pull request
+automatically. Do *not* close it and open a new one; that would destroy the
+conversation and reviews.
 
 Cockpit is a designed project. Anything that the user will see should have
 design done first. This is done on the wiki and mailing list.
@@ -438,6 +533,20 @@ Cockpit log out, use something like:
 
     >> localStorage.debugging = "spawn"
 
+## Using React Developer Tools
+
+Cockpit uses React for the JavaScript frontend, [React Developer
+Tools](https://react.dev/learn/react-developer-tools) is a browser extension to
+inspect React components, edit props and state. Out of the box the developer
+tools do not work with Cockpit due to the pages being loaded in a separate
+iframe. A workaround is to load the page directly by embedding, for example for
+the system overview page:
+
+<http://localhost:9090/cockpit/@localhost/system/index.html>
+
+This loads the system overview as a standalone page allowing React Developer
+tools to inspect its state.
+
 ## Running Cockpit processes under a debugger
 
 You may want to run cockpit-ws under a debugger such as valgrind or gdb. You can
@@ -485,7 +594,7 @@ For running tests, the following dependencies are required:
 
     sudo dnf install curl expect xz rpm-build chromium-headless dbus-daemon \
         libvirt-daemon-driver-storage-core libvirt-daemon-driver-qemu libvirt-client python3-libvirt \
-        python3-flake8 python3-pyyaml
+        python3-pyyaml
 
 For compiling the C parts, you will need the package build dependencies:
 

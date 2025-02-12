@@ -14,29 +14,40 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
-import * as PK from 'packagekit.js';
+import * as PK from 'packagekit';
 import { superuser } from 'superuser';
+import { get_manifest_config_matchlist } from 'utils';
 
 import * as utils from './utils.js';
 
 import * as python from "python.js";
 import { read_os_release } from "os-release.js";
 
-import { find_warnings } from "./warnings.jsx";
-
 import inotify_py from "inotify.py";
 import mount_users_py from "./mount-users.py";
-import nfs_mounts_py from "./nfs-mounts.py";
-import vdo_monitor_py from "./vdo-monitor.py";
-import stratis2_set_key_py from "./stratis2-set-key.py";
-import stratis3_set_key_py from "./stratis3-set-key.py";
+import nfs_mounts_py from "./nfs/nfs-mounts.py";
+import vdo_monitor_py from "./legacy-vdo/vdo-monitor.py";
+import stratis3_set_key_py from "./stratis/stratis3-set-key.py";
+
+import { reset_pages } from "./pages.jsx";
+import { make_overview_page } from "./overview/overview.jsx";
+import { export_mount_point_mapping } from "./anaconda.jsx";
+
+import { dequal } from 'dequal/lite';
+
+import btrfs_tool_py from "./btrfs/btrfs-tool.py";
 
 /* STORAGED CLIENT
  */
+
+function debug() {
+    if (window.debugging == "all" || window.debugging?.includes("storaged")) // not-covered: debugging
+        console.debug.apply(console, arguments); // not-covered: debugging
+}
 
 const client = {
     busy: 0
@@ -44,15 +55,16 @@ const client = {
 
 cockpit.event_target(client);
 
-client.run = (func) => {
-    const prom = func();
-    if (prom) {
-        client.busy += 1;
-        return prom.finally(() => {
-            client.busy -= 1;
-            client.dispatchEvent("changed");
-        });
-    }
+client.run = async (func) => {
+    if (client.in_anaconda_mode())
+        await btrfs_stop_monitoring();
+    const prom = func() || Promise.resolve();
+    client.busy += 1;
+    await prom.finally(() => {
+        client.busy -= 1;
+        btrfs_start_monitor();
+        client.dispatchEvent("changed");
+    });
 };
 
 /* Superuser
@@ -174,6 +186,7 @@ function init_proxies () {
     client.blocks_swap = proxies("Swapspace");
     client.iscsi_sessions = proxies("ISCSI.Session");
     client.vdo_vols = proxies("VDOVolume");
+    client.blocks_fsys_btrfs = proxies("Filesystem.BTRFS");
     client.jobs = proxies("Job");
 
     return client.storaged_client.watch({ path_namespace: "/org/freedesktop/UDisks2" });
@@ -190,6 +203,200 @@ client.swap_sizes = instance_sampler([{ name: "swapdev.length" },
     { name: "swapdev.free" },
 ], "direct");
 
+function btrfs_findmnt_poll() {
+    if (!client.btrfs_mounts)
+        client.btrfs_mounts = { };
+
+    const update_btrfs_mounts = output => {
+        const btrfs_mounts = {};
+        try {
+            // Extract the data into a { uuid: { subvolid: { subvol, target } } }
+            const mounts = JSON.parse(output);
+            if ("filesystems" in mounts) {
+                for (const fs of mounts.filesystems) {
+                    const subvolid_match = fs.options.match(/subvolid=(?<subvolid>\d+)/);
+                    const subvol_match = fs.options.match(/subvol=(?<subvol>[\w\\/]+)/);
+                    const ro = fs.options.split(",").indexOf("ro") >= 0;
+
+                    if (!subvolid_match && !subvol_match) {
+                        console.warn("findmnt entry without subvol and subvolid", fs);
+                        break;
+                    }
+
+                    const { subvolid } = subvolid_match.groups;
+                    const { subvol } = subvol_match.groups;
+                    const subvolume = {
+                        pathname: subvol,
+                        id: subvolid,
+                        mount_points: [fs.target],
+                        rw_mount_points: ro ? [] : [fs.target],
+                    };
+
+                    if (!(fs.uuid in btrfs_mounts)) {
+                        btrfs_mounts[fs.uuid] = { };
+                    }
+
+                    // We need to handle multiple mounts, they are listed separate.
+                    if (subvolid in btrfs_mounts[fs.uuid]) {
+                        btrfs_mounts[fs.uuid][subvolid].mount_points.push(fs.target);
+                        if (!ro)
+                            btrfs_mounts[fs.uuid][subvolid].rw_mount_points.push(fs.target);
+                    } else {
+                        btrfs_mounts[fs.uuid][subvolid] = subvolume;
+                    }
+                }
+            }
+        } catch (exc) {
+            if (exc.message)
+                console.error("unable to parse findmnt JSON output", exc);
+        }
+
+        // Update client state
+        if (!dequal(client.btrfs_mounts, btrfs_mounts)) {
+            client.btrfs_mounts = btrfs_mounts;
+            debug("btrfs_findmnt_poll mounts:", client.btrfs_mounts);
+            client.update();
+        }
+    };
+
+    const findmnt_poll = () => {
+        return cockpit.spawn(["findmnt", "--type", "btrfs", "--mtab", "--poll"], { superuser: "try", err: "message" }).stream(() => {
+            cockpit.spawn(["findmnt", "--type", "btrfs", "--mtab", "-o", "UUID,OPTIONS,TARGET", "--json"],
+                          { superuser: "try", err: "message" }).then(output => update_btrfs_mounts(output)).catch(err => {
+                // When there are no btrfs filesystems left this can fail and thus we need to manually reset the mount info.
+                client.btrfs_mounts = {};
+                client.update();
+                if (err.message) {
+                    console.error("findmnt exited with an error", err);
+                }
+            });
+        }).catch(err => {
+            console.error("findmnt --poll exited with an error", err);
+            throw new Error("findmnt --poll stopped working");
+        });
+    };
+
+    // This fails when no btrfs filesystem is found with the --mtab option and exits with 1, so that is kinda useless, however without --mtab
+    // we don't get a nice flat structure. So we ignore the errors
+    cockpit.spawn(["findmnt", "--type", "btrfs", "--mtab", "-o", "UUID,OPTIONS,SOURCE,TARGET", "--json"],
+                  { superuser: "try", err: "message" }).then(output => {
+        update_btrfs_mounts(output);
+        findmnt_poll();
+    }).catch(err => {
+        // only log error when there is a real issue.
+        if (client.superuser.allowed && err.message) {
+            console.error(`unable to run findmnt ${err}`);
+        }
+        findmnt_poll();
+    });
+}
+
+function btrfs_update(data) {
+    if (!client.uuids_btrfs_subvols)
+        client.uuids_btrfs_subvols = { };
+    if (!client.uuids_btrfs_usage)
+        client.uuids_btrfs_usage = { };
+    if (!client.uuids_btrfs_default_subvol)
+        client.uuids_btrfs_default_subvol = { };
+
+    const uuids_subvols = { };
+    const uuids_usage = { };
+    const default_subvol = { };
+
+    for (const uuid in data) {
+        if (data[uuid].error) {
+            console.warn("Error polling btrfs", uuid, data[uuid].error);
+        } else {
+            uuids_subvols[uuid] = [{ pathname: "/", id: 5, parent: null }].concat(data[uuid].subvolumes);
+            uuids_usage[uuid] = data[uuid].usages;
+            default_subvol[uuid] = data[uuid].default_subvolume;
+        }
+    }
+
+    if (!dequal(client.uuids_btrfs_subvols, uuids_subvols) || !dequal(client.uuids_btrfs_usage, uuids_usage) ||
+        !dequal(client.uuids_btrfs_default_subvol, default_subvol)) {
+        debug("btrfs_pol new subvols:", uuids_subvols);
+        client.uuids_btrfs_subvols = uuids_subvols;
+        client.uuids_btrfs_usage = uuids_usage;
+        debug("btrfs_pol usage:", uuids_usage);
+        client.uuids_btrfs_default_subvol = default_subvol;
+        debug("btrfs_pol default subvolumes:", default_subvol);
+        client.update();
+    }
+}
+
+export async function btrfs_tool(args) {
+    return await python.spawn(btrfs_tool_py, args, { superuser: "require" });
+}
+
+function btrfs_poll_options() {
+    if (client.in_anaconda_mode())
+        return ["--mount"];
+    else
+        return [];
+}
+
+export async function btrfs_poll() {
+    if (!client.superuser.allowed || !client.features.btrfs) {
+        return;
+    }
+
+    const data = JSON.parse(await btrfs_tool(["poll", ...btrfs_poll_options()]));
+    btrfs_update(data);
+}
+
+let btrfs_monitor_channel = null;
+
+function btrfs_start_monitor() {
+    if (!client.superuser.allowed || !client.features.btrfs) {
+        return;
+    }
+
+    if (btrfs_monitor_channel)
+        return;
+
+    const channel = python.spawn(btrfs_tool_py, ["monitor", ...btrfs_poll_options()], { superuser: "require" });
+    let buf = "";
+
+    channel.stream(output => {
+        buf += output;
+        const lines = buf.split("\n");
+        buf = lines[lines.length - 1];
+        if (lines.length >= 2) {
+            const data = JSON.parse(lines[lines.length - 2]);
+            btrfs_update(data);
+        }
+    });
+
+    channel.catch(err => {
+        throw new Error(err.toString());
+    });
+
+    btrfs_monitor_channel = channel;
+}
+
+function btrfs_stop_monitoring() {
+    if (btrfs_monitor_channel) {
+        const res = btrfs_monitor_channel.then(() => {
+            btrfs_monitor_channel = null;
+        });
+        btrfs_monitor_channel.close();
+        return res;
+    } else {
+        return Promise.resolve();
+    }
+}
+
+function btrfs_start_polling() {
+    debug("starting polling for btrfs subvolumes");
+    client.uuids_btrfs_subvols = { };
+    client.uuids_btrfs_usage = { };
+    client.uuids_btrfs_default_subvol = { };
+    client.btrfs_mounts = { };
+    btrfs_findmnt_poll();
+    btrfs_start_monitor();
+}
+
 /* Derived indices.
  */
 
@@ -205,6 +412,26 @@ function is_multipath_master(block) {
     return false;
 }
 
+function is_toplevel_drive(block) {
+    // We consider all Block objects that point to the same Drive
+    // objects to be multipath members for a single actual device.
+    //
+    // However, objects for partitions point to the same Drive object
+    // as the object for the partition table. We have to ignore them.
+
+    if (client.blocks_part[block.path])
+        return false;
+
+    // Also, eMMCs have special partition-like sub-devices that point
+    // to the main Drive. We identify them by their name, just like
+    // UDisks2.
+
+    if (utils.decode_filename(block.Device).match(/\/dev\/mmcblk[0-9]boot[0-9]$/))
+        return false;
+
+    return true;
+}
+
 function update_indices() {
     let path, block, mdraid, vgroup, pvol, lvol, pool, blockdev, fsys, part, i;
 
@@ -216,7 +443,7 @@ function update_indices() {
     }
     for (path in client.blocks) {
         block = client.blocks[path];
-        if (!client.blocks_part[path] && client.drives_multipath_blocks[block.Drive] !== undefined) {
+        if (client.drives_multipath_blocks[block.Drive] !== undefined && is_toplevel_drive(block)) {
             if (is_multipath_master(block))
                 client.drives_block[block.Drive] = block;
             else
@@ -283,14 +510,24 @@ function update_indices() {
         client.vgnames_vgroup[vgroup.Name] = vgroup;
     }
 
+    const vgroups_with_dm_pvs = { };
+
     client.vgroups_pvols = { };
     for (path in client.vgroups) {
         client.vgroups_pvols[path] = [];
     }
     for (path in client.blocks_pvol) {
         pvol = client.blocks_pvol[path];
-        if (client.vgroups_pvols[pvol.VolumeGroup] !== undefined)
+        if (client.vgroups_pvols[pvol.VolumeGroup] !== undefined) {
             client.vgroups_pvols[pvol.VolumeGroup].push(pvol);
+            {
+                // HACK - this is needed below to deal with a UDisks2 bug.
+                // https://github.com/storaged-project/udisks/pull/1206
+                const block = client.blocks[path];
+                if (block && utils.decode_filename(block.Device).indexOf("/dev/dm-") == 0)
+                    vgroups_with_dm_pvs[pvol.VolumeGroup] = true;
+            }
+        }
     }
     function cmp_pvols(a, b) {
         return utils.block_cmp(client.blocks[a.path], client.blocks[b.path]);
@@ -329,6 +566,101 @@ function update_indices() {
     }
     for (path in client.lvols_pool_members) {
         client.lvols_pool_members[path].sort(function (a, b) { return a.Name.localeCompare(b.Name) });
+    }
+
+    function summarize_stripe(lv_size, segments) {
+        const pvs = { };
+        let total_size = 0;
+        for (const [, size, pv] of segments) {
+            if (!pvs[pv])
+                pvs[pv] = 0;
+            pvs[pv] += size;
+            total_size += size;
+        }
+        if (total_size < lv_size)
+            pvs["/"] = lv_size - total_size;
+        return pvs;
+    }
+
+    client.lvols_stripe_summary = { };
+    client.lvols_status = { };
+    for (path in client.lvols) {
+        const struct = client.lvols[path].Structure;
+        const lvol = client.lvols[path];
+
+        // HACK - UDisks2 can't find the PVs of a segment when they
+        //        are on a device mapper device.
+        //
+        // https://github.com/storaged-project/udisks/pull/1206
+
+        if (vgroups_with_dm_pvs[lvol.VolumeGroup])
+            continue;
+
+        let summary;
+        let status = "";
+        if (lvol.Layout != "thin" && struct && struct.segments) {
+            summary = summarize_stripe(struct.size.v, struct.segments.v);
+            if (summary["/"])
+                status = "partial";
+        } else if (struct && struct.data && struct.metadata &&
+                   (struct.data.v.length == struct.metadata.v.length || struct.metadata.v.length == 0)) {
+            summary = [];
+            const n_total = struct.data.v.length;
+            let n_missing = 0;
+            for (let i = 0; i < n_total; i++) {
+                const data_lv = struct.data.v[i];
+                const metadata_lv = struct.metadata.v[i] || { size: { v: 0 }, segments: { v: [] } };
+
+                if (!data_lv.segments || (metadata_lv && !metadata_lv.segments)) {
+                    summary = undefined;
+                    break;
+                }
+
+                const s = summarize_stripe(data_lv.size.v + metadata_lv.size.v,
+                                           data_lv.segments.v.concat(metadata_lv.segments.v));
+                if (s["/"])
+                    n_missing += 1;
+
+                summary.push(s);
+            }
+            if (n_missing > 0) {
+                status = "partial";
+                if (lvol.Layout == "raid1") {
+                    if (n_total - n_missing >= 1)
+                        status = "degraded";
+                }
+                if (lvol.Layout == "raid10") {
+                    // This is correct for two-way mirroring, which is
+                    // the only setup supported by lvm2.
+                    if (n_missing > n_total / 2) {
+                        // More than half of the PVs are gone -> at
+                        // least one mirror has definitely lost both
+                        // halves.
+                        status = "partial";
+                    } else if (n_missing > 1) {
+                        // Two or more PVs are lost -> one mirror
+                        // might have lost both halves
+                        status = "degraded-maybe-partial";
+                    } else {
+                        // Only one PV is missing -> no mirror has
+                        // lost both halves.
+                        status = "degraded";
+                    }
+                }
+                if (lvol.Layout == "raid4" || lvol.Layout == "raid5") {
+                    if (n_missing <= 1)
+                        status = "degraded";
+                }
+                if (lvol.Layout == "raid6") {
+                    if (n_missing <= 2)
+                        status = "degraded";
+                }
+            }
+        }
+        if (summary) {
+            client.lvols_stripe_summary[path] = summary;
+            client.lvols_status[path] = status;
+        }
     }
 
     client.stratis_poolnames_pool = { };
@@ -378,14 +710,63 @@ function update_indices() {
             client.blocks_stratis_blockdev[block.path] = client.stratis_blockdevs[path];
     }
 
-    client.blocks_stratis_locked_pool = { };
-    for (const uuid in client.stratis_manager.LockedPools) {
-        const devs = client.stratis_manager.LockedPools[uuid].devs.v;
+    client.blocks_stratis_stopped_pool = { };
+    client.stratis_stopped_pool_key_description = { };
+    client.stratis_stopped_pool_clevis_info = { };
+    for (const uuid in client.stratis_manager.StoppedPools) {
+        const devs = client.stratis_manager.StoppedPools[uuid].devs.v;
         for (const d of devs) {
             block = client.slashdevs_block[d.devnode];
             if (block)
-                client.blocks_stratis_locked_pool[block.path] = uuid;
+                client.blocks_stratis_stopped_pool[block.path] = uuid;
         }
+        const kinfo = client.stratis_manager.StoppedPools[uuid].key_description;
+        if (kinfo &&
+            kinfo.t == "(bv)" &&
+            kinfo.v[0] &&
+            kinfo.v[1].t == "(bs)" &&
+            kinfo.v[1].v[0]) {
+            client.stratis_stopped_pool_key_description[uuid] = kinfo.v[1].v[1];
+        }
+        const cinfo = client.stratis_manager.StoppedPools[uuid].clevis_info;
+        if (cinfo &&
+            cinfo.t == "(bv)" &&
+            cinfo.v[0] &&
+            cinfo.v[1].t == "(b(ss))" &&
+            cinfo.v[1].v[0]) {
+            client.stratis_stopped_pool_clevis_info[uuid] = cinfo.v[1].v[1];
+        }
+    }
+
+    client.stratis_pool_stats = { };
+    for (path in client.stratis_pools) {
+        const pool = client.stratis_pools[path];
+        const filesystems = client.stratis_pool_filesystems[path];
+
+        const fsys_offsets = [];
+        let fsys_total_used = 0;
+        let fsys_total_size = 0;
+        filesystems.forEach(fs => {
+            fsys_offsets.push(fsys_total_used);
+            fsys_total_used += fs.Used[0] ? Number(fs.Used[1]) : 0;
+            fsys_total_size += Number(fs.Size);
+        });
+
+        const overhead = pool.TotalPhysicalUsed[0] ? (Number(pool.TotalPhysicalUsed[1]) - fsys_total_used) : 0;
+        const pool_total = Number(pool.TotalPhysicalSize) - overhead;
+        let pool_free = pool_total - fsys_total_size;
+
+        // leave some margin since the above computation does not seem to
+        // be exactly right when snapshots are involved.
+        pool_free -= filesystems.length * 1024 * 1024;
+
+        client.stratis_pool_stats[path] = {
+            fsys_offsets,
+            fsys_total_used,
+            fsys_total_size,
+            pool_total,
+            pool_free,
+        };
     }
 
     client.blocks_cleartext = { };
@@ -408,29 +789,107 @@ function update_indices() {
         client.blocks_partitions[path].sort(function (a, b) { return a.Offset - b.Offset });
     }
 
+    client.iscsi_sessions_drives = { };
+    client.drives_iscsi_session = { };
+    for (path in client.drives) {
+        const block = client.drives_block[path];
+        if (!block)
+            continue;
+        for (const session_path in client.iscsi_sessions) {
+            const session = client.iscsi_sessions[session_path];
+            for (i = 0; i < block.Symlinks.length; i++) {
+                if (utils.decode_filename(block.Symlinks[i]).includes(session.data.target_name)) {
+                    client.drives_iscsi_session[path] = session;
+                    if (!client.iscsi_sessions_drives[session_path])
+                        client.iscsi_sessions_drives[session_path] = [];
+                    client.iscsi_sessions_drives[session_path].push(client.drives[path]);
+                }
+            }
+        }
+    }
+
+    client.blocks_available = { };
+    for (path in client.blocks) {
+        block = client.blocks[path];
+        if (utils.is_available_block(client, block))
+            client.blocks_available[path] = true;
+    }
+
     client.path_jobs = { };
     function enter_job(job) {
         if (!job.Objects || !job.Objects.length)
             return;
-        job.Objects.forEach(function (path) {
-            client.path_jobs[path] = job;
-            let parent = utils.get_parent(client, path);
-            while (parent) {
-                path = parent;
-                parent = utils.get_parent(client, path);
-            }
-            client.path_jobs[path] = job;
+        job.Objects.forEach(p => {
+            if (!client.path_jobs[p])
+                client.path_jobs[p] = [];
+            client.path_jobs[p].push(job);
         });
     }
     for (path in client.jobs) {
         enter_job(client.jobs[path]);
     }
+
+    // UDisks API does not provide a btrfs volume abstraction so we keep track of
+    // volume's by uuid in an object. uuid => [org.freedesktop.UDisks2.Filesystem.BTRFS]
+    // https://github.com/storaged-project/udisks/issues/1232
+    const old_uuids = client.uuids_btrfs_volume;
+    let need_poll = false;
+    client.uuids_btrfs_volume = { };
+    client.uuids_btrfs_blocks = { };
+    for (const p in client.blocks_fsys_btrfs) {
+        const bfs = client.blocks_fsys_btrfs[p];
+        const uuid = bfs.data.uuid;
+        const block_fsys = client.blocks_fsys[p];
+        if ((block_fsys && block_fsys.MountPoints.length > 0) || !client.uuids_btrfs_volume[uuid]) {
+            client.uuids_btrfs_volume[uuid] = bfs;
+            if (!old_uuids || !old_uuids[uuid])
+                need_poll = true;
+        }
+        if (!client.uuids_btrfs_blocks[uuid])
+            client.uuids_btrfs_blocks[uuid] = [];
+        client.uuids_btrfs_blocks[uuid].push(client.blocks[p]);
+    }
+
+    if (need_poll) {
+        btrfs_poll();
+    }
 }
 
-client.update = () => {
-    update_indices();
-    client.path_warnings = find_warnings(client);
-    client.dispatchEvent("changed");
+let lvm2_poll_timer = null;
+
+function update_lvm2_polling(for_visibility) {
+    const need_polling = !cockpit.hidden && !!Object.values(client.vgroups).find(vg => vg.NeedsPolling);
+
+    function poll() {
+        for (const path in client.vgroups) {
+            const vg = client.vgroups[path];
+            if (vg.NeedsPolling) {
+                vg.Poll();
+            }
+        }
+    }
+
+    if (need_polling && lvm2_poll_timer == null) {
+        lvm2_poll_timer = window.setInterval(poll, 2000);
+        if (for_visibility)
+            poll();
+    } else if (!need_polling && lvm2_poll_timer) {
+        window.clearInterval(lvm2_poll_timer);
+        lvm2_poll_timer = null;
+    }
+}
+
+client.update = (first_time) => {
+    if (first_time)
+        client.ready = true;
+    if (client.ready) {
+        update_indices();
+        update_lvm2_polling(false);
+        reset_pages();
+        make_overview_page();
+        export_mount_point_mapping();
+        client.dispatchEvent("changed");
+    }
 };
 
 function init_model(callback) {
@@ -441,25 +900,38 @@ function init_model(callback) {
                 });
     }
 
-    function enable_udisks_features() {
+    async function enable_udisks_features() {
         if (!client.manager.valid)
-            return Promise.resolve();
-        if (!client.manager.EnableModules)
-            return Promise.resolve();
-        return client.manager.EnableModules(true).then(
-            function() {
-                client.manager_lvm2 = proxy("Manager.LVM2", "Manager");
-                client.manager_iscsi = proxy("Manager.ISCSI.Initiator", "Manager");
-                return Promise.allSettled([client.manager_lvm2.wait(), client.manager_iscsi.wait()])
-                        .then(() => {
-                            client.features.lvm2 = client.manager_lvm2.valid;
-                            client.features.iscsi = (client.manager_iscsi.valid &&
-                                                            client.manager_iscsi.SessionsSupported !== false);
-                        });
-            }, function(error) {
-                console.warn("Can't enable storaged modules", error.toString());
-                return Promise.resolve();
-            });
+            return;
+
+        try {
+            await client.manager.EnableModule("btrfs", true);
+            client.manager_btrfs = proxy("Manager.BTRFS", "Manager");
+            await client.manager_btrfs.wait();
+            client.features.btrfs = client.manager_btrfs.valid;
+            if (client.features.btrfs)
+                btrfs_start_polling();
+        } catch (error) {
+            console.warn("Can't enable storaged btrfs module", error.toString());
+        }
+
+        try {
+            await client.manager.EnableModule("iscsi", true);
+            client.manager_iscsi = proxy("Manager.ISCSI.Initiator", "Manager");
+            await client.manager_iscsi.wait();
+            client.features.iscsi = (client.manager_iscsi.valid && client.manager_iscsi.SessionsSupported !== false);
+        } catch (error) {
+            console.warn("Can't enable storaged iscsi module", error.toString());
+        }
+
+        try {
+            await client.manager.EnableModule("lvm2", true);
+            client.manager_lvm2 = proxy("Manager.LVM2", "Manager");
+            await client.manager_lvm2.wait();
+            client.features.lvm2 = client.manager_lvm2.valid;
+        } catch (error) {
+            console.warn("Can't enable storaged lvm2 module", error.toString());
+        }
     }
 
     function enable_lvm_create_vdo_feature() {
@@ -481,7 +953,7 @@ function init_model(callback) {
     }
 
     function enable_clevis_features() {
-        return cockpit.spawn(["which", "clevis-luks-bind"], { err: "ignore" }).then(
+        return cockpit.script("type clevis-luks-bind", { err: "ignore" }).then(
             function () {
                 client.features.clevis = true;
                 return Promise.resolve();
@@ -496,7 +968,7 @@ function init_model(callback) {
         // $PATH, such as when connecting from CentOS to another
         // machine via SSH as non-root.
         const std_path = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-        return cockpit.spawn(["which", "mount.nfs"], { err: "message", environ: [std_path] }).then(
+        return cockpit.script("type mount.nfs", { err: "message", environ: [std_path] }).then(
             function () {
                 client.features.nfs = true;
                 client.nfs.start();
@@ -508,6 +980,10 @@ function init_model(callback) {
     }
 
     function enable_pk_features() {
+        if (client.in_anaconda_mode()) {
+            client.features.packagekit = false;
+            return Promise.resolve();
+        }
         return PK.detect().then(function (available) { client.features.packagekit = available });
     }
 
@@ -531,52 +1007,41 @@ function init_model(callback) {
     }
 
     function query_fsys_info() {
-        const info = {
-            xfs: {
-                can_format: true,
-                can_shrink: false,
-                can_grow: true,
-                grow_needs_unmount: false
-            },
+        const info = {};
+        return Promise.all(client.manager.SupportedFilesystems.map(fs =>
+            client.manager.CanFormat(fs).then(canformat_result => {
+                info[fs] = {
+                    can_format: canformat_result[0],
+                    can_shrink: false,
+                    can_grow: false
+                };
+                return client.manager.CanResize(fs)
+                        .then(canresize_result => {
+                            // We assume that all filesystems support
+                            // offline shrinking/growing if they
+                            // support shrinking or growing at all.
+                            // The actual resizing utility will
+                            // temporarily mount the fs if necessary,
+                            if (canresize_result[0]) {
+                                info[fs].can_shrink = !!(canresize_result[1] & 2);
+                                info[fs].shrink_needs_unmount = !(canresize_result[1] & 8);
+                                info[fs].can_grow = !!(canresize_result[1] & 4);
+                                info[fs].grow_needs_unmount = !(canresize_result[1] & 16);
+                            }
+                        })
+                        // ignore unsupported filesystems
+                        .catch(() => {});
+            }))
+        ).then(() => info);
+    }
 
-            ext4: {
-                can_format: true,
-                can_shrink: true,
-                shrink_needs_unmount: true,
-                can_grow: true,
-                grow_needs_unmount: false
-            },
-        };
-
-        if (client.manager.SupportedFilesystems && client.manager.CanResize) {
-            return Promise.all(client.manager.SupportedFilesystems.map(fs =>
-                client.manager.CanFormat(fs).then(canformat_result => {
-                    info[fs] = {
-                        can_format: canformat_result[0],
-                        can_shrink: false,
-                        can_grow: false
-                    };
-                    return client.manager.CanResize(fs)
-                            .then(canresize_result => {
-                                // We assume that all filesystems support
-                                // offline shrinking/growing if they
-                                // support shrinking or growing at all.
-                                // The actual resizing utility will
-                                // temporarily mount the fs if necessary,
-                                if (canresize_result[0]) {
-                                    info[fs].can_shrink = !!(canresize_result[1] & 2);
-                                    info[fs].shrink_needs_unmount = !(canresize_result[1] & 8);
-                                    info[fs].can_grow = !!(canresize_result[1] & 4);
-                                    info[fs].grow_needs_unmount = !(canresize_result[1] & 16);
-                                }
-                            })
-                            // ignore unsupported filesystems
-                            .catch(() => {});
-                }))
-            ).then(() => info);
-        } else {
-            return Promise.resolve(info);
-        }
+    try {
+        client.anaconda = JSON.parse(window.sessionStorage.getItem("cockpit_anaconda"));
+        if (client.anaconda)
+            console.log("ANACONDA", client.anaconda);
+    } catch {
+        console.warn("Can't parse cockpit_anaconda configuration as JSON");
+        client.anaconda = null;
     }
 
     pull_time().then(() => {
@@ -589,8 +1054,12 @@ function init_model(callback) {
 
                     client.storaged_client.addEventListener('notify', () => client.update());
 
-                    client.update();
-                    callback();
+                    update_indices();
+                    cockpit.addEventListener("visibilitychange", () => update_lvm2_polling(true));
+                    btrfs_poll().then(() => {
+                        client.update(true);
+                        callback();
+                    });
                 });
             });
         });
@@ -630,12 +1099,11 @@ client.stop_mount_users = (users) => {
  */
 
 client.mount_at = (block, target) => {
-    const entry = utils.array_find(block.Configuration,
-                                   c => c[0] == "fstab" && utils.decode_filename(c[1].dir.v) == target);
+    const entry = block.Configuration.find(c => c[0] == "fstab" && utils.decode_filename(c[1].dir.v) == target);
     if (entry)
         return cockpit.script('set -e; mkdir -p "$2"; mount "$1" "$2" -o "$3"',
-                              [utils.decode_filename(block.Device), target, utils.decode_filename(entry[1].opts.v)],
-                              { superuser: true, err: "message" });
+                              [utils.decode_filename(block.Device), target, utils.get_block_mntopts(entry[1])],
+                              { superuser: "require", err: "message" });
     else
         return Promise.reject(cockpit.format("Internal error: No fstab entry for $0 and $1",
                                              utils.decode_filename(block.Device),
@@ -644,7 +1112,7 @@ client.mount_at = (block, target) => {
 
 client.unmount_at = (target, users) => {
     return client.stop_mount_users(users).then(() => cockpit.spawn(["umount", target],
-                                                                   { superuser: true, err: "message" }));
+                                                                   { superuser: "require", err: "message" }));
 };
 
 /* NFS mounts
@@ -686,7 +1154,7 @@ function nfs_mounts() {
                     if (lines.length >= 2) {
                         self.entries = JSON.parse(lines[lines.length - 2]);
                         self.fsys_sizes = { };
-                        client.dispatchEvent('changed');
+                        client.update();
                     }
                 })
                 .catch(function (error) {
@@ -709,11 +1177,11 @@ function nfs_mounts() {
                 .then(function (output) {
                     const data = JSON.parse(output);
                     self.fsys_sizes[path] = [(data[2] - data[1]) * data[0], data[2] * data[0]];
-                    client.dispatchEvent('changed');
+                    client.update();
                 })
                 .catch(function () {
                     self.fsys_sizes[path] = [0, 0];
-                    client.dispatchEvent('changed');
+                    client.update();
                 });
 
         return null;
@@ -784,7 +1252,7 @@ function legacy_vdo_overlay() {
     function cmd(args) {
         return cockpit.spawn(["vdo"].concat(args),
                              {
-                                 superuser: true,
+                                 superuser: "require",
                                  err: "message"
                              });
     }
@@ -863,7 +1331,7 @@ function legacy_vdo_overlay() {
     function start() {
         let buf = "";
 
-        return cockpit.spawn(["/bin/sh", "-c", "head -1 $(which vdo || echo /dev/null)"],
+        return cockpit.spawn(["/bin/sh", "-c", "head -1 $(command -v vdo || echo /dev/null)"],
                              { err: "ignore" })
                 .then(function (shebang) {
                     if (shebang != "") {
@@ -934,19 +1402,14 @@ client.legacy_vdo_overlay = legacy_vdo_overlay();
 /* Stratis */
 
 client.stratis_start = () => {
-    return stratis2_start()
-            .catch(error => {
-                if (error.problem == "not-found")
-                    return stratis3_start();
-                return Promise.reject(error);
-            });
+    return stratis3_start();
 };
 
 // We need to use the same revision for all interfaces, mixing them is
 // not allowed.  If we need to bump it, it should be bumped here for all
 // of them at the same time.
 //
-const stratis3_interface_revision = "r0";
+const stratis3_interface_revision = "r6";
 
 function stratis3_start() {
     const stratis = cockpit.dbus("org.storage.stratis3", { superuser: "try" });
@@ -958,32 +1421,22 @@ function stratis3_start() {
     client.stratis_pools = { };
     client.stratis_blockdevs = { };
     client.stratis_filesystems = { };
-    client.stratis_manager.LockedPools = {};
+    client.stratis_manager.StoppedPools = {};
 
     return client.stratis_manager.wait()
             .then(() => {
                 client.stratis_store_passphrase = (desc, passphrase) => {
-                    return python.spawn(stratis3_set_key_py, [desc], { superuser: true })
+                    return python.spawn(stratis3_set_key_py, [desc], { superuser: "require" })
                             .input(passphrase);
                 };
 
-                client.stratis_unlock_pool = (uuid) => {
-                    return client.stratis_manager.UnlockPool(uuid, "keyring");
-                };
-
-                client.stratis_create_pool = (name, devs, key_desc) => {
-                    return client.stratis_manager.CreatePool(name, [false, 0],
-                                                             devs,
-                                                             key_desc ? [true, key_desc] : [false, ""],
-                                                             [false, ["", ""]]);
-                };
-
-                client.stratis_list_keys = () => {
-                    return client.stratis_manager.ListKeys();
-                };
-
-                client.stratis_create_filesystem = (pool, name) => {
-                    return pool.CreateFilesystems([[name, [false, ""]]]);
+                client.stratis_set_property = (proxy, prop, sig, value) => {
+                    // DBusProxy is smart enough to allow "proxy.Prop
+                    // = value" to just work, but we want to catch any
+                    // error ourselves, and we want to wait for the
+                    // method call to complete.
+                    return stratis.call(proxy.path, "org.freedesktop.DBus.Properties", "Set",
+                                        [proxy.iface, prop, cockpit.variant(sig, value)]);
                 };
 
                 client.features.stratis = true;
@@ -1006,245 +1459,6 @@ function stratis3_start() {
                     });
                 });
             });
-}
-
-function stratis2_start() {
-    const stratis = cockpit.dbus("org.storage.stratis2", { superuser: "try" });
-    client.stratis_manager = stratis.proxy("org.storage.stratis2.Manager.r1",
-                                           "/org/storage/stratis2");
-
-    // The rest of the code expects these to be initialized even if no
-    // stratisd is found.
-    client.stratis_pools = { };
-    client.stratis_blockdevs = { };
-    client.stratis_filesystems = { };
-    client.stratis_manager.LockedPools = {};
-
-    return client.stratis_manager.wait()
-            .then(() => {
-                if (utils.compare_versions(client.stratis_manager.Version, "2.4") < 0)
-                    return Promise.reject(new Error("stratisd too old, need at least version 2.4"));
-
-                client.stratis_store_passphrase = (desc, passphrase) => {
-                    return python.spawn(stratis2_set_key_py, [desc], { superuser: true })
-                            .input(passphrase);
-                };
-
-                client.stratis_unlock_pool = (uuid) => {
-                    return client.stratis_manager.UnlockPool(uuid);
-                };
-
-                client.stratis_create_pool = (name, devs, key_desc) => {
-                    return client.stratis_manager.CreatePool(name, [false, 0],
-                                                             devs,
-                                                             key_desc ? [true, key_desc] : [false, ""]);
-                };
-
-                client.stratis_create_filesystem = (pool, name) => {
-                    return pool.CreateFilesystems([name]);
-                };
-
-                client.stratis_list_keys = () => {
-                    return client.stratis_manager.client.call(client.stratis_manager.path,
-                                                              "org.storage.stratis2.FetchProperties.r2",
-                                                              "GetProperties", [["KeyList"]])
-                            .then(([result]) => {
-                                if (result.KeyList && result.KeyList[0])
-                                    return result.KeyList[1].v;
-                                else
-                                    return [];
-                            });
-                };
-
-                client.features.stratis = true;
-                client.stratis_pools = client.stratis_manager.client.proxies("org.storage.stratis2.pool.r1",
-                                                                             "/org/storage/stratis2",
-                                                                             { watch: false });
-                client.stratis_blockdevs = client.stratis_manager.client.proxies("org.storage.stratis2.blockdev.r2",
-                                                                                 "/org/storage/stratis2",
-                                                                                 { watch: false });
-                client.stratis_filesystems = client.stratis_manager.client.proxies("org.storage.stratis2.filesystem",
-                                                                                   "/org/storage/stratis2",
-                                                                                   { watch: false });
-
-                return stratis.watch({ path_namespace: "/org/storage/stratis2" }).then(() => {
-                    client.stratis_manager.client.addEventListener('notify', (event, data) => {
-                        client.update();
-                        stratis2_fixup_pool_notifications(data);
-                    });
-
-                    // We need to explicitly retrieve the values of
-                    // the "FetchProperties".  We do this whenever a
-                    // new object appears, when something happens that
-                    // might have changed them (for example when a
-                    // filesystem has been added to a pool we fetch
-                    // the properties of the pool), and also every 30
-                    // seconds, just to be safe.
-                    //
-                    // See https://github.com/stratis-storage/stratisd/issues/2148
-
-                    client.stratis_pools.addEventListener('added', (event, proxy) => {
-                        stratis2_fetch_pool_properties(proxy);
-                        // A entry might have disappeared from LockedPoolsWithDevs
-                        stratis2_fetch_manager_properties(client.stratis_manager);
-                    });
-
-                    client.stratis_blockdevs.addEventListener('added', (event, proxy) => {
-                        stratis2_fetch_pool_properties_by_path(proxy.Pool);
-                        stratis2_fetch_blockdev_properties(proxy);
-                    });
-
-                    client.stratis_blockdevs.addEventListener('removed', (event, proxy) => {
-                        stratis2_fetch_pool_properties_by_path(proxy.Pool);
-                    });
-
-                    client.stratis_filesystems.addEventListener('added', (event, proxy) => {
-                        stratis2_fetch_filesystem_properties(proxy);
-                        stratis2_fetch_pool_properties_by_path(proxy.Pool);
-                    });
-
-                    client.stratis_filesystems.addEventListener('removed', (event, proxy) => {
-                        stratis2_fetch_pool_properties_by_path(proxy.Pool);
-                    });
-
-                    stratis2_start_polling();
-                    return true;
-                });
-            })
-            .catch(err => {
-                if (err.problem == "not-found")
-                    err.message = "The name org.storage.stratis2 can not be activated on D-Bus.";
-                return Promise.reject(err);
-            });
-}
-
-function stratis2_fetch_properties(proxy, props) {
-    const stratis = client.stratis_manager.client;
-
-    return stratis.call(proxy.path, "org.storage.stratis2.FetchProperties.r4", "GetProperties", [props])
-            .then(([result]) => {
-                const values = { };
-                for (const p of props) {
-                    if (result[p] && result[p][0])
-                        values[p] = result[p][1].v;
-                }
-                return values;
-            })
-            .catch(error => {
-                console.warn("Failed to fetch properties:", proxy.path, props, error);
-                return { };
-            });
-}
-
-function stratis2_fetch_manager_properties(proxy) {
-    stratis2_fetch_properties(proxy, ["LockedPoolsWithDevs"]).then(values => {
-        if (values.LockedPoolsWithDevs) {
-            proxy.LockedPools = { };
-            for (const uuid in values.LockedPoolsWithDevs) {
-                const l = values.LockedPoolsWithDevs[uuid];
-                proxy.LockedPools[uuid] = {
-                    devs: l.devs,
-                    key_description: { t: "(bv)", v: [true, l.key_description] },
-                };
-            }
-            client.update();
-        }
-    });
-}
-
-function stratis2_fetch_pool_properties(proxy) {
-    if (!proxy.TotalPhysicalUsed)
-        proxy.TotalPhysicalUsed = [false, ""];
-    if (!proxy.KeyDescription)
-        proxy.KeyDescription = [false, ""];
-    stratis2_fetch_properties(proxy, ["TotalPhysicalSize", "TotalPhysicalUsed", "KeyDescription"]).then(values => {
-        if (values.TotalPhysicalSize)
-            proxy.TotalPhysicalSize = values.TotalPhysicalSize;
-        if (values.TotalPhysicalUsed)
-            proxy.TotalPhysicalUsed = [true, values.TotalPhysicalUsed];
-        if (values.KeyDescription)
-            proxy.KeyDescription = [true, values.KeyDescription];
-        client.update();
-    });
-}
-
-function stratis2_fetch_pool_properties_by_path(path) {
-    const pool = client.stratis_pools[path];
-    if (pool)
-        stratis2_fetch_pool_properties(pool);
-}
-
-function stratis2_fetch_filesystem_properties(proxy) {
-    if (!proxy.Used)
-        proxy.Used = [false, ""];
-    stratis2_fetch_properties(proxy, ["Used"]).then(values => {
-        if (values.Used)
-            proxy.Used = [true, values.Used];
-    });
-}
-
-function stratis2_fetch_blockdev_properties(proxy) {
-    stratis2_fetch_properties(proxy, ["TotalPhysicalSize"]).then(values => {
-        if (values.TotalPhysicalSize)
-            proxy.TotalPhysicalSize = values.TotalPhysicalSize;
-        client.update();
-    });
-}
-
-function stratis2_poll() {
-    stratis2_fetch_manager_properties(client.stratis_manager);
-
-    for (const path in client.stratis_pools)
-        stratis2_fetch_pool_properties(client.stratis_pools[path]);
-
-    for (const path in client.stratis_filesystems)
-        stratis2_fetch_filesystem_properties(client.stratis_filesystems[path]);
-
-    for (const path in client.stratis_blockdevs)
-        stratis2_fetch_blockdev_properties(client.stratis_blockdevs[path]);
-}
-
-function stratis2_start_polling() {
-    stratis2_poll();
-    window.setInterval(stratis2_poll, 30000);
-}
-
-function stratis2_fixup_pool_notifications(data) {
-    const fixup_data = { };
-    let have_fixup = false;
-
-    // When renaming a pool, stratisd 2.4.2 sends out notifications
-    // with wrong interface names and forgets about notifications for
-    // Devnode properties.
-    //
-    // https://github.com/stratis-storage/stratisd/issues/2731
-
-    for (const path in data) {
-        if (client.stratis_pools[path]) {
-            for (const iface in data[path]) {
-                if (iface == "org.storage.stratis2.filesystem") {
-                    const props = data[path][iface];
-                    if (props && props.Name) {
-                        // The pool at 'path' got renamed.
-                        fixup_data[path] = { "org.storage.stratis2.pool.r1": { Name: props.Name } };
-                        for (const fsys of client.stratis_pool_filesystems[path]) {
-                            fixup_data[fsys.path] = {
-                                "org.storage.stratis2.filesystem": {
-                                    Devnode: "/dev/stratis/" + props.Name + "/" + fsys.Name
-                                }
-                            };
-                        }
-                        have_fixup = true;
-                    }
-                }
-            }
-        }
-    }
-
-    if (have_fixup) {
-        const stratis = client.stratis_manager.client;
-        stratis.notify(fixup_data);
-    }
 }
 
 function init_client(manager, callback) {
@@ -1287,15 +1501,43 @@ client.wait_for = function wait_for(cond) {
     });
 };
 
-client.get_config = (name, def) => {
-    if (cockpit.manifests.storage && cockpit.manifests.storage.config) {
-        let val = cockpit.manifests.storage.config[name];
-        if (typeof val === 'object' && val !== null)
-            val = val[client.os_release.ID];
-        return val !== undefined ? val : def;
-    } else {
-        return def;
+client.get_config = (name, def) =>
+    get_manifest_config_matchlist("storage", name, def, [client.os_release.PLATFORM_ID, client.os_release.ID]);
+
+client.in_anaconda_mode = () => !!client.anaconda;
+
+client.strip_mount_point_prefix = (dir) => {
+    const mpp = client.anaconda?.mount_point_prefix;
+
+    if (dir && mpp) {
+        if (dir.indexOf(mpp) != 0)
+            return false;
+
+        dir = dir.substring(mpp.length);
+        if (dir == "")
+            dir = "/";
     }
+
+    return dir;
+};
+
+client.add_mount_point_prefix = (dir) => {
+    const mpp = client.anaconda?.mount_point_prefix;
+    if (mpp && dir != "") {
+        if (dir == "/")
+            dir = mpp;
+        else
+            dir = mpp + dir;
+    }
+    return dir;
+};
+
+client.should_ignore_device = (devname) => {
+    return client.anaconda?.available_devices && client.anaconda.available_devices.indexOf(devname) == -1;
+};
+
+client.should_ignore_block = (block) => {
+    return client.should_ignore_device(utils.decode_filename(block.PreferredDevice));
 };
 
 export default client;

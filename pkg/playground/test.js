@@ -1,13 +1,13 @@
 import cockpit from "cockpit";
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import "../../node_modules/@patternfly/patternfly/components/Button/button.css";
 import "../../node_modules/@patternfly/patternfly/components/Page/page.css";
 
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("hammer").addEventListener("click", e => e.target.setAttribute("hidden", "hidden"));
 
-    document.querySelector(".cockpit-internal-reauthorize .pf-c-button").addEventListener("click", () => {
+    document.querySelector(".cockpit-internal-reauthorize .pf-v5-c-button").addEventListener("click", () => {
         document.querySelector(".cockpit-internal-reauthorize span").textContent = "checking...";
         cockpit.script("pkcheck --action-id org.freedesktop.policykit.exec --process $$ -u 2>&1", { superuser: "try" })
                 .stream(data => console.debug(data))
@@ -19,9 +19,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
     });
 
-    document.querySelector(".super-channel .pf-c-button").addEventListener("click", () => {
+    document.querySelector(".super-channel .pf-v5-c-button").addEventListener("click", () => {
         document.querySelector(".super-channel span").textContent = "checking...";
-        cockpit.spawn(["id"], { superuser: true })
+        cockpit.spawn(["id"], { superuser: "require" })
                 .then(data => {
                     console.log("done");
                     document.querySelector(".super-channel span").textContent = "result: " + data;
@@ -32,7 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
     });
 
-    document.querySelector(".lock-channel .pf-c-button").addEventListener("click", () => {
+    document.querySelector(".lock-channel .pf-v5-c-button").addEventListener("click", () => {
         document.querySelector(".lock-channel span").textContent = "locking...";
         cockpit.spawn(["flock", "-o", "/tmp/playground-test-lock", "-c", "echo locked; sleep infinity"],
                       { superuser: "try", err: "message" })
@@ -45,7 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     function update_nav() {
-        document.getElementById("nav").innerHTML = '';
+        document.getElementById("nav").textContent = '';
         const path = ["top"].concat(cockpit.location.path);
         const e_nav = document.getElementById("nav");
         path.forEach((p, i) => {
@@ -87,7 +87,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (error)
             return complain(error);
         document.getElementById('file-content').textContent = normalize_counter(content).counter;
-        document.getElementById('file-error').innerHTML = "";
+        document.getElementById('file-error').textContent = "";
     }
 
     counter.watch(changed);
@@ -125,6 +125,32 @@ document.addEventListener("DOMContentLoaded", () => {
         document.getElementById("hidden").textContent = cockpit.hidden ? "hidden" : "visible";
     }
 
+    cockpit.user().then(info => {
+        console.log(info);
+        document.getElementById("user-info").textContent = JSON.stringify(info);
+    });
+
     cockpit.addEventListener("visibilitychange", show_hidden);
     show_hidden();
+
+    const fsreplace_btn = document.getElementById("fsreplace1-create");
+    const fsreplace_error = document.getElementById("fsreplace1-error");
+    fsreplace_btn.addEventListener("click", e => {
+        fsreplace_btn.disabled = true;
+        fsreplace_error.textContent = '';
+        const filename = document.getElementById("fsreplace1-filename").value;
+        const content = document.getElementById("fsreplace1-content").value;
+        const use_tag = document.getElementById("fsreplace1-use-tag").checked;
+        const file = cockpit.file(filename, { superuser: "try" });
+
+        file.read().then((_content, tag) => {
+            file.replace(content, use_tag ? tag : undefined)
+                    .catch(exc => {
+                        fsreplace_error.textContent = exc.toString();
+                    })
+                    .finally(() => {
+                        fsreplace_btn.disabled = false;
+                    });
+        });
+    });
 });

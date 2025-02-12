@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React from "react";
@@ -23,7 +23,7 @@ import PropTypes from "prop-types";
 import { Tooltip } from "@patternfly/react-core/dist/esm/components/Tooltip/index.js";
 import { BundleIcon } from "@patternfly/react-icons";
 import { ListingTable } from "cockpit-components-table.jsx";
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
 
 import cockpit from "cockpit";
 
@@ -32,11 +32,16 @@ const _ = cockpit.gettext;
 function formatPkgs(pkgs) {
     const names = Object.keys(pkgs).filter(i => i != "_time");
     names.sort();
-    return names.map(n => (
-        <Tooltip key={n} id="tip-history" content={ n + " " + pkgs[n] }>
-            <li>{n}</li>
-        </Tooltip>)
-    );
+    return names.map(n => {
+        const tooltipRef = React.useRef(null);
+
+        return (
+            <React.Fragment key={n}>
+                <li ref={tooltipRef}>{n}</li>
+                <Tooltip triggerRef={tooltipRef} content={ n + " " + pkgs[n] } />
+            </React.Fragment>
+        );
+    });
 }
 
 export const PackageList = ({ packages }) => packages ? <ul className='flow-list'>{formatPkgs(packages)}</ul> : null;

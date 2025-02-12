@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
@@ -24,8 +24,9 @@ import { superuser } from "superuser";
 import { admins } from './users.js';
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { Badge } from "@patternfly/react-core/dist/esm/components/Badge/index.js";
-import { Card, CardActions, CardExpandableContent, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
-import { Dropdown, DropdownItem, DropdownSeparator, KebabToggle } from "@patternfly/react-core/dist/esm/components/Dropdown/index.js";
+import { Card, CardExpandableContent, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
+import { Divider } from '@patternfly/react-core/dist/esm/components/Divider/index.js';
+import { DropdownItem } from '@patternfly/react-core/dist/esm/components/Dropdown/index.js';
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { HelperText, HelperTextItem } from "@patternfly/react-core/dist/esm/components/HelperText/index.js";
 import { Label } from "@patternfly/react-core/dist/esm/components/Label/index.js";
@@ -34,7 +35,7 @@ import { SearchInput } from "@patternfly/react-core/dist/esm/components/SearchIn
 import { Stack } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
 import { Text, TextContent, TextVariants } from "@patternfly/react-core/dist/esm/components/Text/index.js";
 import { Toolbar, ToolbarContent, ToolbarItem } from "@patternfly/react-core/dist/esm/components/Toolbar/index.js";
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
 import { EmptyStatePanel } from 'cockpit-components-empty-state.jsx';
 import { ListingTable } from 'cockpit-components-table.jsx';
 import { SearchIcon } from '@patternfly/react-icons';
@@ -47,12 +48,11 @@ import { logoutAccountDialog } from "./logout-account-dialog.js";
 import { GroupActions } from "./group-actions.jsx";
 
 import { usePageLocation } from "hooks";
+import { KebabDropdown } from "cockpit-components-dropdown";
 
 const _ = cockpit.gettext;
 
-const UserActions = ({ account }) => {
-    const [isKebabOpen, setKebabOpen] = useState(false);
-
+const UserActions = ({ account, current }) => {
     const actions = [
         <DropdownItem key="edit-user"
                       onClick={ev => { ev.preventDefault(); cockpit.location.go(account.name) }}>
@@ -61,39 +61,30 @@ const UserActions = ({ account }) => {
     ];
 
     superuser.allowed && actions.push(
-        <DropdownSeparator key="separator-0" />,
+        <Divider key="separator-0" />,
         <DropdownItem key="log-user-out"
-                      isDisabled={account.uid === 0 || !account.loggedIn}
-                      onClick={() => { setKebabOpen(false); logoutAccountDialog(account) }}>
+                      isDisabled={account.uid === 0 || !account.loggedIn || current }
+                      onClick={() => logoutAccountDialog(account) }>
             {_("Log user out")}
         </DropdownItem>,
-        <DropdownSeparator key="separator-1" />,
+        <Divider key="separator-1" />,
         <DropdownItem key="lock-account"
                       isDisabled={account.isLocked}
-                      onClick={() => { setKebabOpen(false); lockAccountDialog(account) }}>
+                      onClick={() => lockAccountDialog(account) }>
             {_("Lock account")}
         </DropdownItem>,
         <DropdownItem key="delete-account"
-                      isDisabled={account.uid === 0}
-                      className={account.uid === 0 ? "" : "delete-resource-red"}
-                      onClick={() => { setKebabOpen(false); delete_account_dialog(account) }}>
+                      isDisabled={account.uid === 0 || current}
+                      className={account.uid === 0 || current ? "" : "delete-resource-red"}
+                      onClick={() => delete_account_dialog(account) }>
             {_("Delete account")}
         </DropdownItem>,
     );
 
-    const kebab = (
-        <Dropdown toggle={<KebabToggle onToggle={setKebabOpen} />}
-                isPlain
-                isOpen={isKebabOpen}
-                position="right"
-                id="accounts-actions"
-                menuAppendTo={document.body}
-                dropdownItems={actions} />
-    );
-    return kebab;
+    return <KebabDropdown toggleButtonId="accounts-actions" dropdownItems={actions} />;
 };
 
-const getGroupRow = (group, accounts, isUserCreatedGroup) => {
+const getGroupRow = (group, accounts) => {
     let groupColorClass;
     if (group.isAdmin)
         groupColorClass = "group-gold";
@@ -144,13 +135,13 @@ const getGroupRow = (group, accounts, isUserCreatedGroup) => {
     if (superuser.allowed) {
         columns.push(
             {
-                title: <GroupActions group={group} accounts={accounts} isUserCreatedGroup={isUserCreatedGroup} />,
-                props: { className: "pf-c-table__action" }
+                title: <GroupActions group={group} />,
+                props: { className: "pf-v5-c-table__action" }
             }
         );
     }
 
-    return { columns, props: { key: group.gid } };
+    return { columns, props: { key: group.name } };
 };
 
 const getAccountRow = (account, current, groups) => {
@@ -182,7 +173,7 @@ const getAccountRow = (account, current, groups) => {
             title: (
                 <span>
                     <a href={"#/" + account.name}>{account.name}</a>
-                    {current && <Badge className="pf-u-ml-lg" id="current-account-badge">{_("Your account")}</Badge>}
+                    {current && <Badge id="current-account-badge">{_("Your account")}</Badge>}
                 </span>
             ),
             sortKey: account.name,
@@ -210,12 +201,12 @@ const getAccountRow = (account, current, groups) => {
             props: { width: 20 },
         },
         {
-            title: <UserActions account={account} />,
-            props: { className: "pf-c-table__action" }
+            title: <UserActions account={account} current={current} />,
+            props: { className: "pf-v5-c-table__action" }
         },
     ];
 
-    return { columns, props: { key: account.uid } };
+    return { columns, props: { key: account.name } };
 };
 
 const mapGroupsToAccount = (accounts, groups) => {
@@ -301,7 +292,7 @@ const GroupsList = ({ groups, accounts, isExpanded, setIsExpanded, min_gid, max_
                 { superuser.allowed &&
                     <>
                         {isExpanded && <ToolbarItem variant="separator" />}
-                        <ToolbarItem alignment={{ md: 'alignRight' }}>
+                        <ToolbarItem align={{ md: 'alignRight' }}>
                             <Button variant="secondary" id="groups-create" onClick={() => group_create_dialog(groups, setIsExpanded, min_gid, max_gid)}>
                                 {_("Create new group")}
                             </Button>
@@ -314,7 +305,7 @@ const GroupsList = ({ groups, accounts, isExpanded, setIsExpanded, min_gid, max_
 
     return (
         <Card className="ct-card" isExpanded={isExpanded}>
-            <CardHeader
+            <CardHeader actions={{ actions: tableToolbar, hasNoOffset: true }}
                 className="ct-card-expandable-header"
                 onExpand={() => setIsExpanded(!isExpanded)}
                 toggleButtonProps={{
@@ -322,7 +313,7 @@ const GroupsList = ({ groups, accounts, isExpanded, setIsExpanded, min_gid, max_
                     'aria-label': _("Groups"),
                     'aria-expanded': isExpanded
                 }}>
-                <CardTitle className="pf-l-flex pf-m-space-items-sm pf-m-align-items-center">
+                <CardTitle className="pf-v5-l-flex pf-m-align-items-center pf-m-space-items-md">
                     <Text component={TextVariants.h2}>{_("Groups")}</Text>
                     {(!isExpanded && !groups.length) && <HelperText> <HelperTextItem variant="indeterminate">{_("Loading...")}</HelperTextItem></HelperText>}
                     {(!isExpanded && filtered_groups.length > 0) && <>
@@ -340,9 +331,6 @@ const GroupsList = ({ groups, accounts, isExpanded, setIsExpanded, min_gid, max_
                         </Button>}
                     </>}
                 </CardTitle>
-                <CardActions>
-                    {tableToolbar}
-                </CardActions>
             </CardHeader>
             <CardExpandableContent>
                 <ListingTable columns={columns}
@@ -350,7 +338,8 @@ const GroupsList = ({ groups, accounts, isExpanded, setIsExpanded, min_gid, max_
                     rows={ filtered_groups.map(a => getGroupRow(a, accounts)) }
                     loading={ groups.length && accounts.length ? '' : _("Loading...") }
                     sortMethod={sortRows}
-                    emptyComponent={<EmptyStatePanel title={_("No matching results")} icon={SearchIcon} />}
+                    emptyComponent={<EmptyStatePanel title={_("No matching results")} icon={SearchIcon} action={_("Clear filter")}
+                                                     onAction={() => setCurrentTextFilter('')} actionVariant="link" />}
                     variant="compact" sortBy={{ index: 2, direction: SortByDirection.asc }} />
             </CardExpandableContent>
         </Card>
@@ -393,6 +382,7 @@ const AccountsList = ({ accounts, current_user, groups, min_uid, max_uid, shells
         { title: _("ID"), sortable: true },
         { title: _("Last active"), sortable: true },
         { title: _("Group") },
+        { title: "", sortable: false, props: { screenReaderText: _("Actions") } },
     ];
 
     const sortRows = (rows, direction, idx) => {
@@ -441,7 +431,7 @@ const AccountsList = ({ accounts, current_user, groups, min_uid, max_uid, shells
                 { superuser.allowed &&
                     <>
                         <ToolbarItem variant="separator" />
-                        <ToolbarItem alignment={{ md: 'alignRight' }}>
+                        <ToolbarItem align={{ md: 'alignRight' }}>
                             <Button id="accounts-create" onClick={() => account_create_dialog(accounts, min_uid, max_uid, shells)}>
                                 {_("Create new account")}
                             </Button>
@@ -454,11 +444,8 @@ const AccountsList = ({ accounts, current_user, groups, min_uid, max_uid, shells
 
     return (
         <Card className="ct-card">
-            <CardHeader>
-                <CardTitle>
-                    <Text component={TextVariants.h2}>{_("Accounts")}</Text>
-                </CardTitle>
-                {tableToolbar}
+            <CardHeader actions={{ actions: tableToolbar }}>
+                <CardTitle component="h2">{_("Accounts")}</CardTitle>
             </CardHeader>
             <ListingTable columns={columns}
                           id="accounts-list"
@@ -466,7 +453,8 @@ const AccountsList = ({ accounts, current_user, groups, min_uid, max_uid, shells
                           rows={ filtered_accounts.map(a => getAccountRow(a, current_user === a.name, groups)) }
                           loading={ accounts.length ? '' : _("Loading...") }
                           sortMethod={sortRows}
-                          emptyComponent={<EmptyStatePanel title={_("No matching results")} icon={SearchIcon} />}
+                          emptyComponent={<EmptyStatePanel title={_("No matching results")} icon={SearchIcon} action={_("Clear filter")}
+                                                           onAction={() => setCurrentTextFilter('')} actionVariant="link" />}
                           variant="compact" sortBy={{ index: 0, direction: SortByDirection.asc }} />
         </Card>
 

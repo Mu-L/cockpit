@@ -15,7 +15,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState, useContext } from 'react';
@@ -151,7 +151,8 @@ export const TeamDialog = ({ connection, dev, settings }) => {
         <NetworkModal dialogError={dialogError}
                       idPrefix={idPrefix}
                       onSubmit={onSubmit}
-                      title={_("Team settings")}
+                      title={!connection ? _("Add team") : _("Edit team settings")}
+                      isCreateDialog={!connection}
         >
             <>
                 <Name idPrefix={idPrefix} iface={iface} setIface={setIface} />
@@ -159,19 +160,19 @@ export const TeamDialog = ({ connection, dev, settings }) => {
                     <MemberInterfaceChoices idPrefix={idPrefix} memberChoices={memberChoices} setMemberChoices={setMemberChoices} model={model} group={connection} />
                 </FormGroup>
                 <FormGroup fieldId={idPrefix + "-runner-select"} label={_("Runner")}>
-                    <FormSelect id={idPrefix + "-runner-select"} onChange={setRunner}
+                    <FormSelect id={idPrefix + "-runner-select"} onChange={(_, val) => setRunner(val)}
                                 value={runner}>
                         {team_runner_choices.map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                     </FormSelect>
                 </FormGroup>
                 {(runner == "loadbalance" || runner == "lacp") && <FormGroup fieldId={idPrefix + "-balancer-select"} label={_("Balancer")}>
-                    <FormSelect id={idPrefix + "-balancer-select"} onChange={setBalancer}
+                    <FormSelect id={idPrefix + "-balancer-select"} onChange={(_, val) => setBalancer(val)}
                                 value={balancer}>
                         {team_balancer_choices.map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                     </FormSelect>
                 </FormGroup>}
-                {runner == "active-backup" && <FormGroup fieldId={idPrefix + "-primary-select"} label={_("Primary")}>
-                    <FormSelect id={idPrefix + "-primary-select"} onChange={setPrimary}
+                {runner == "activebackup" && <FormGroup fieldId={idPrefix + "-primary-select"} label={_("Primary")}>
+                    <FormSelect id={idPrefix + "-primary-select"} onChange={(_, val) => setPrimary(val)}
                                 value={primary}>
                         <>
                             <FormSelectOption key='-' value={null} label='-' />
@@ -182,25 +183,25 @@ export const TeamDialog = ({ connection, dev, settings }) => {
                     </FormSelect>
                 </FormGroup>}
                 <FormGroup fieldId={idPrefix + "-link-watch-select"} label={_("Link watch")}>
-                    <FormSelect id={idPrefix + "-link-watch-select"} onChange={setLinkWatch}
+                    <FormSelect id={idPrefix + "-link-watch-select"} onChange={(_, val) => setLinkWatch(val)}
                                 value={linkWatch}>
                         {team_watch_choices.map(choice => <FormSelectOption value={choice.choice} label={choice.title} key={choice.choice} />)}
                     </FormSelect>
                 </FormGroup>
                 {linkWatch == 'ethtool' && <>
                     <FormGroup fieldId={idPrefix + "-link-up-delay-input"} label={_("Link up delay")}>
-                        <TextInput id={idPrefix + "-link-up-delay-input"} className="network-number-field" value={linkUpDelay} onChange={setLinkUpDelay} />
+                        <TextInput id={idPrefix + "-link-up-delay-input"} className="network-number-field" value={linkUpDelay} onChange={(_event, value) => setLinkUpDelay(value)} />
                     </FormGroup>
                     <FormGroup fieldId={idPrefix + "-link-down-delay-input"} label={_("Link down delay")}>
-                        <TextInput id={idPrefix + "-link-down-delay-input"} className="network-number-field" value={linkDownDelay} onChange={setLinkDownDelay} />
+                        <TextInput id={idPrefix + "-link-down-delay-input"} className="network-number-field" value={linkDownDelay} onChange={(_event, value) => setLinkDownDelay(value)} />
                     </FormGroup>
                 </>}
                 {linkWatch != 'ethtool' && <>
                     <FormGroup fieldId={idPrefix + "-ping-interval-input"} label={_("Ping interval")}>
-                        <TextInput id={idPrefix + "-ping-interval-input"} className="network-number-field" value={pingInterval} onChange={setPingInterval} />
+                        <TextInput id={idPrefix + "-ping-interval-input"} className="network-number-field" value={pingInterval} onChange={(_event, value) => setPingInterval(value)} />
                     </FormGroup>
                     <FormGroup fieldId={idPrefix + "-ping-target-input"} label={_("Ping target")}>
-                        <TextInput id={idPrefix + "-ping-target-input"} value={pingTarget} onChange={setPingTarget} />
+                        <TextInput id={idPrefix + "-ping-target-input"} value={pingTarget} onChange={(_event, value) => setPingTarget(value)} />
                     </FormGroup>
                 </>}
             </>

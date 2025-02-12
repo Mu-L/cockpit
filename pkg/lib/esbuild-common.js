@@ -11,25 +11,19 @@ export const esbuildStylesPlugins = [
     replace({
         include: /\.css$/,
         values: {
-            '576px': '236px',
+            // Do not override the sm breakpoint as for width < 768px the left nav is hidden
             '768px': '428px',
             '992px': '652px',
             '1200px': '876px',
             '1450px': '1100px',
         }
     }),
-    replace({
-        include: /DataList.js$/,
-        values: {
-            'import stylesGrid': "// HACK: revert when https://github.com/patternfly/patternfly-react/pull/8864 is released",
-            stylesGrid: 'styles',
-        }
-    }),
     sassPlugin({
         loadPaths: [...nodePaths, 'node_modules'],
+        filter: /\.scss/,
         quietDeps: true,
         async transform(source, resolveDir, path) {
-            if (path.includes('patternfly-4-cockpit.scss')) {
+            if (path.includes('patternfly-5-cockpit.scss')) {
                 return source
                         .replace(/url.*patternfly-icons-fake-path.*;/g, 'url("../base1/fonts/patternfly.woff") format("woff");')
                         .replace(/@font-face[^}]*patternfly-fonts-fake-path[^}]*}/g, '');
@@ -37,4 +31,4 @@ export const esbuildStylesPlugins = [
             return source;
         }
     }),
-]
+];

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,22 +15,14 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from netlib import NetworkCase
-from testlib import skipDistroPackage, test_main, wait
-
-from lib.constants import TEST_OS_DEFAULT
+import netlib
+import testlib
 
 
-@skipDistroPackage()
-class TestNetworkingMTU(NetworkCase):
-    provision = {
-        "machine1": {"memory_mb": 512},
-        "machine2": {"image": TEST_OS_DEFAULT, "address": "10.111.113.2/20", "dhcp": True, "memory_mb": 256}
-    }
-
+@testlib.nondestructive
+class TestNetworkingMTU(netlib.NetworkCase):
     def testMtu(self):
         b = self.browser
         m = self.machine
@@ -38,7 +30,9 @@ class TestNetworkingMTU(NetworkCase):
         self.login_and_go("/network")
         b.wait_visible("#networking")
 
-        iface = self.add_iface()
+        iface = 'cockpit1'
+        self.add_veth(iface, dhcp_cidr="10.111.113.2/20")
+        self.nm_activate_eth(iface)
         self.wait_for_iface(iface)
 
         self.select_iface(iface)
@@ -48,19 +42,28 @@ class TestNetworkingMTU(NetworkCase):
         b.wait_visible("#network-mtu-settings-dialog")
 
         # wait until dialog initialized
-        b.wait_visible("#network-mtu-settings-dialog > button[aria-label=Close]")
+        b.wait_visible("#network-mtu-settings-dialog button[aria-label=Close]")
         b.wait_visible("#network-mtu-settings-custom")
         b.assert_pixels("#network-mtu-settings-dialog", "networking-mtu-settings-dialog")
 
-        b.set_checked('#network-mtu-settings-custom', True)
+        b.set_checked('#network-mtu-settings-custom', val=True)
+        b.set_input_text("#network-mtu-settings-input", "-1500")
+        b.click("button:contains('Save')")
+        b.wait_visible("#network-mtu-settings-error:contains('MTU must be a positive number')")
         b.set_input_text('#network-mtu-settings-input', "1400")
         b.click("#network-mtu-settings-save")
         b.wait_not_present("#network-mtu-settings-dialog")
         self.wait_for_iface_setting('MTU', '1400')
 
         # We're debugging failures here log status to journal for diagnosis
-        wait(lambda: "mtu 1400" in m.execute(f"ip link show {iface} | logger -s 2>&1"))
+        testlib.wait(lambda: "mtu 1400" in m.execute(f"ip link show {iface} | logger -s 2>&1"))
+
+        self.configure_iface_setting("MTU")
+        b.wait_visible("#network-mtu-settings-dialog")
+        b.set_checked("#network-mtu-settings-auto", val=True)
+        b.click("button:contains('Save')")
+        self.wait_for_iface_setting("MTU", "Automatic")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

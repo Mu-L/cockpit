@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState } from 'react';
@@ -36,7 +36,7 @@ import './motdCard.scss';
 
 const _ = cockpit.gettext;
 
-const MotdEditDialog = ({ text }) => {
+const MotdEditDialog = ({ text, expectedTag }) => {
     const Dialogs = useDialogs();
     const [value, setValue] = useState(text);
     const [error, setError] = useState(null);
@@ -52,9 +52,9 @@ const MotdEditDialog = ({ text }) => {
                    <>
                        <Button variant='primary'
                                onClick={() => cockpit.file("/etc/motd", { superuser: "try", err: "message" })
-                                       .replace(value)
-                                       .done(Dialogs.close)
-                                       .fail(exc => {
+                                       .replace(value, expectedTag)
+                                       .then(Dialogs.close)
+                                       .catch(exc => {
                                            setError(_("Failed to save changes in /etc/motd"));
                                            setErrorDetail(exc.message);
                                        })}>
@@ -73,7 +73,7 @@ const MotdEditDialog = ({ text }) => {
                              dialogErrorDetail={errorDetail} />}
                 <TextArea resizeOrientation="vertical"
                           value={value}
-                          onChange={setValue} />
+                          onChange={(_event, value) => setValue(value)} />
             </Stack>
         </Modal>);
 };
@@ -81,15 +81,17 @@ const MotdEditDialog = ({ text }) => {
 export const MotdCard = () => {
     const Dialogs = useDialogs();
     const [motdText, setMotdText] = useState("");
+    const [motdTag, setMotdTag] = useState(null);
     const [motdVisible, setMotdVisible] = useState(false);
 
     useInit(() => {
-        cockpit.file("/etc/motd").watch(content => {
+        cockpit.file("/etc/motd").watch((content, tag) => {
             /* trim initial empty lines and trailing space, but keep initial spaces to not break ASCII art */
             if (content)
                 content = content.trimRight().replace(/^\s*\n/, '');
             if (content && content != cockpit.localStorage.getItem('dismissed-motd')) {
                 setMotdText(content);
+                setMotdTag(tag);
                 setMotdVisible(true);
             } else {
                 setMotdVisible(false);
@@ -108,15 +110,16 @@ export const MotdCard = () => {
     const actionClose = <>
         {superuser.allowed &&
         <Button variant="plain"
-                                     id="motd-box-edit"
-                                     onClick={() => Dialogs.show(<MotdEditDialog text={motdText} />)}
-                                     aria-label={_("Edit motd")}>
+                id="motd-box-edit"
+                onClick={() => Dialogs.show(<MotdEditDialog text={motdText} expectedTag={motdTag} />)}
+                aria-label={_("Edit motd")}>
             <EditIcon />
         </Button>}
         <AlertActionCloseButton onClose={hideAlert} />
     </>;
 
-    return <Alert id="motd-box" isInline variant="default" className="motd-box"
+    return <Alert id="motd-box" isInline className="motd-box"
+                  variant="custom"
                   title={<pre id="motd">{motdText}</pre>}
                   actionClose={actionClose} />;
 };

@@ -14,14 +14,14 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
 
 import React from 'react';
 import { Accordion, AccordionContent, AccordionItem, AccordionToggle } from "@patternfly/react-core/dist/esm/components/Accordion/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
 import { Stack, StackItem } from "@patternfly/react-core/dist/esm/layouts/Stack/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
@@ -34,7 +34,7 @@ import { journal } from "journal";
 
 const _ = cockpit.gettext;
 
-const Table = ({ lines, delimiter, type }) => {
+const Table = ({ lines, delimiter }) => {
     return (
         <DescriptionList className="pf-m-horizontal-on-sm">
             { lines.map((line, idx) => {
@@ -216,8 +216,9 @@ export class AbrtLogDetails extends React.Component {
         this.renderBacktrace = this.renderBacktrace.bind(this);
     }
 
-    componentDidMount() {
-        this.props.service.GetProblemData(this.props.problem.path).done(details => this.setState({ details }));
+    async componentDidMount() {
+        const details = await this.props.service.GetProblemData(this.props.problem.path);
+        this.setState({ details });
     }
 
     handleSelect(event, active_tab) {
@@ -286,19 +287,17 @@ export class AbrtLogDetails extends React.Component {
                 </GalleryItem>
                 <GalleryItem id="abrt-details">
                     <Card>
-                        <CardHeader>
-                            <CardActions>
-                                <Button variant="danger" onClick={this.onDelete}>{_("Delete")}</Button>
-                            </CardActions>
-                            <CardTitle><h2>{_("Extended information")}</h2></CardTitle>
+                        <CardHeader actions={{ actions: <Button variant="danger" onClick={this.onDelete}>{_("Delete")}</Button> }}>
+
+                            <CardTitle component="h2">{_("Extended information")}</CardTitle>
                         </CardHeader>
                         <CardBody>
                             <Tabs activeKey={this.state.active_tab} onSelect={this.handleSelect}>
                                 <Tab eventKey="general" title={_("General")}>
-                                    <Table lines={general.map(key => [key, journal.printable(this.props.entry[key])])} />
+                                    <Table lines={general.map(key => [key, journal.printable(this.props.entry[key], key)])} />
                                 </Tab>
                                 <Tab eventKey="info" title={_("Problem info")}>
-                                    <Table lines={info.map(key => [key, journal.printable(this.state.details[key][2])])} />
+                                    <Table lines={info.map(key => [key, journal.printable(this.state.details[key][2], key)])} />
                                 </Tab>
                                 <Tab eventKey="details" title={_("Problem details")}>
                                     <Accordion asDefinitionList>

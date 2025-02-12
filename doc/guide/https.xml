@@ -15,8 +15,8 @@
       connection to HTTPS. There are some exceptions:</para>
 
     <itemizedlist>
-      <listitem><para>If an HTTP connection comes from <code>127.0.0.0/8</code>, then
-        Cockpit will allow communication without redirecting to HTTPS.</para></listitem>
+      <listitem><para>If an HTTP connection comes from <code>localhost</code> (<code>127.0.0.1</code> or
+        <code>::1</code>, then Cockpit will allow communication without redirecting to HTTPS.</para></listitem>
       <listitem><para>Certain URLs, like <code>/ping</code> are not required to use
         HTTPS.</para></listitem>
     </itemizedlist>
@@ -24,12 +24,14 @@
     <para>This behavior can be overridden by setting the
       <code>AllowUnencrypted</code> option in <code>cockpit.conf</code>.</para>
   </section>
-    
+
   <section id="https-certificates">
     <title>Certificates</title>
 
-    <para>Cockpit will load a certificate from the <code>/etc/cockpit/ws-certs.d</code>
-      directory. It will use the last file with a <code>.cert</code> or <code>.crt</code>
+    <para>Cockpit will load a certificate from the <code>/etc/cockpit/ws-certs.d</code>,
+    directory, or below <code>$XDG_CONFIG_DIRS</code> if set (see
+      <ulink url="./cockpit.conf.5.html">cockpit.conf</ulink>).
+      It will use the last file with a <code>.cert</code> or <code>.crt</code>
       extension in alphabetical order. The file should contain one or more OpenSSL
       style <literal>BEGIN CERTIFICATE</literal> blocks for the server certificate and
       the intermediate certificate authorities.</para>
@@ -66,7 +68,7 @@ getcert request -f /etc/cockpit/ws-certs.d/50-certmonger.cert \
                 -D myhostname.example.com \
                 [--ca=...]</programlisting>
 
-    <para>This will not work on Red Hat Enterprise Linux/CentOS 8 by default. Adjust the SELinux type of the certificate directory to <code>cert_t</code> to allow certmonger to write its certificates there:</para>
+    <para>This will not work on Red Hat Enterprise Linux 8 by default. Adjust the SELinux type of the certificate directory to <code>cert_t</code> to allow certmonger to write its certificates there:</para>
 
     <programlisting>
 semanage fcontext -a -t cert_t '/etc/cockpit/ws-certs\.d(/.*)?'

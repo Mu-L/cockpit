@@ -1,53 +1,11 @@
 import asyncio
 import json
-import os
-import subprocess
-
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from cockpit.jsonutil import JsonObject, JsonValue
+from cockpit.router import Router
+
 MOCK_HOSTNAME = 'mockbox'
-
-
-def my_subprocesses():
-    try:
-        return subprocess.check_output(['pgrep', '-a', '-P', f'{os.getpid()}'], text=True).splitlines()
-    except subprocess.CalledProcessError:
-        # no processes found?  good!
-        return []
-
-
-def assert_no_subprocesses():
-    running = my_subprocesses()
-    if not running:
-        return
-
-    print('Some subprocesses still running', running)
-    # Clear it out for the sake of the other tests
-    subprocess.call(['pkill', '-9', '-P', f'{os.getpid()}'])
-    for _ in range(100):    # zombie vacuum
-        os.waitpid(-1, os.WNOHANG)  # will eventually throw, failing the test (which we want)
-    assert False  # more than 100?
-
-
-def assert_no_tasks(allow_tasks=0):
-    if len(asyncio.all_tasks()) > allow_tasks:
-        assert asyncio.all_tasks() == []
-
-
-def assert_all_exited(allow_tasks=0):
-    assert_no_subprocesses()
-    assert_no_tasks(allow_tasks)
-
-
-async def settle_down():
-    # Let things settle for a bit
-    for _ in range(100):
-        # We expect at least one task: ourselves!
-        if len(asyncio.all_tasks()) <= 1 and not my_subprocesses():
-            break
-        await asyncio.sleep(0.05)
-    else:
-        assert_all_exited(allow_tasks=1)
 
 
 class MockTransport(asyncio.Transport):
@@ -55,9 +13,14 @@ class MockTransport(asyncio.Transport):
     next_id: int = 0
     close_future: Optional[asyncio.Future] = None
 
-    def send_json(self, _channel: str, **kwargs) -> None:
-        msg = {k.replace('_', '-'): v for k, v in kwargs.items()}
-        self.send_data(_channel, json.dumps(msg).encode('ascii'))
+    async def assert_empty(self):
+        await asyncio.sleep(0.1)
+        assert self.queue.qsize() == 0
+
+    def send_json(self, channel_: str, **kwargs) -> None:
+        # max_read_size is one of our special keys which uses underscores
+        msg = {k.replace('_', '-') if k != "max_read_size" else k: v for k, v in kwargs.items()}
+        self.send_data(channel_, json.dumps(msg).encode('ascii'))
 
     def send_data(self, channel: str, data: bytes) -> None:
         msg = channel.encode('ascii') + b'\n' + data
@@ -66,6 +29,14 @@ class MockTransport(asyncio.Transport):
 
     def send_init(self, version=1, host=MOCK_HOSTNAME, **kwargs):
         self.send_json('', command='init', version=version, host=host, **kwargs)
+
+    def init(self, **kwargs: Any) -> Dict[str, object]:
+        channel, data = self.queue.get_nowait()
+        assert channel == ''
+        msg = json.loads(data)
+        assert msg['command'] == 'init'
+        self.send_init(**kwargs)
+        return msg
 
     def get_id(self, prefix: str) -> str:
         self.next_id += 1
@@ -77,13 +48,23 @@ class MockTransport(asyncio.Transport):
         self.send_json('', command='open', channel=channel, payload=payload, **kwargs)
         return channel
 
-    async def check_open(self, payload, channel=None, problem=None, reply_keys: Optional[Dict[str, object]] = None, **kwargs):
+    async def check_open(
+        self,
+        payload,
+        channel=None,
+        problem=None,
+        reply_keys: Optional[JsonObject] = None,
+        absent_keys: 'Iterable[str]' = (),
+        **kwargs,
+    ):
+        assert isinstance(self.protocol, Router)
         ch = self.send_open(payload, channel, **kwargs)
         if problem is None:
-            await self.assert_msg('', command='ready', channel=ch, **(reply_keys or {}))
-            assert ch in self.protocol.open_channels
+            await self.assert_msg('', command='ready', channel=ch, absent_keys=absent_keys, **(reply_keys or {}))
+            # it's possible that the channel already closed
         else:
-            await self.assert_msg('', command='close', channel=ch, problem=problem, **(reply_keys or {}))
+            await self.assert_msg('', command='close', channel=ch, problem=problem, absent_keys=absent_keys,
+                                  **(reply_keys or {}))
             assert ch not in self.protocol.open_channels
         return ch
 
@@ -111,16 +92,15 @@ class MockTransport(asyncio.Transport):
         _, channel, data = data.split(b'\n', 2)
         self.queue.put_nowait((channel.decode('ascii'), data))
 
-    async def stop(self) -> None:
+    def stop(self, event_loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         keep_open = self.protocol.eof_received()
         if keep_open:
-            self.close_future = asyncio.get_running_loop().create_future()
+            assert event_loop is not None
+            self.close_future = event_loop.create_future()
             try:
-                await self.close_future
+                event_loop.run_until_complete(self.close_future)
             finally:
                 self.close_future = None
-
-        await settle_down()
 
     def close(self) -> None:
         if self.close_future is not None:
@@ -142,9 +122,12 @@ class MockTransport(asyncio.Transport):
         assert channel == expected_channel
         assert data == expected_data
 
-    async def assert_msg(self, expected_channel, **kwargs) -> Dict[str, object]:
+    async def assert_msg(self, expected_channel: str, absent_keys: 'Iterable[str]' = (),
+                         **kwargs: JsonValue) -> JsonObject:
         msg = await self.next_msg(expected_channel)
-        assert msg == msg | {k.replace('_', '-'): v for k, v in kwargs.items()}, msg
+        assert msg == dict(msg, **{k.replace('_', '-'): v for k, v in kwargs.items()}), msg
+        for absent_key in absent_keys:
+            assert absent_key not in msg
         return msg
 
     # D-Bus helpers
@@ -161,7 +144,12 @@ class MockTransport(asyncio.Transport):
         self.send_json(bus, call=[path, iface, name, args], id=tag)
         return tag
 
-    async def assert_bus_reply(self, tag: str, expected_reply: Optional[list] = None, bus: Optional[str] = None) -> list:
+    async def assert_bus_reply(
+        self,
+        tag: str,
+        expected_reply: Optional[list] = None,
+        bus: Optional[str] = None,
+    ) -> list:
         if bus is None:
             bus = await self.ensure_internal_bus()
         reply = await self.next_msg(bus)
@@ -179,34 +167,56 @@ class MockTransport(asyncio.Transport):
         assert 'id' in reply, reply
         assert reply['id'] == tag, reply
         assert 'error' in reply, reply
-        assert reply['error'] == [code, [message]]
+        assert reply['error'] == [code, [message]], reply['error']
 
-    async def check_bus_call(self, path: str, iface: str, name: str, args: list, expected_reply: Optional[list] = None, bus: Optional[str] = None) -> list:
+    async def check_bus_call(
+        self,
+        path: str,
+        iface: str,
+        name: str,
+        args: list,
+        expected_reply: Optional[list] = None,
+        bus: Optional[str] = None,
+    ) -> list:
         if bus is None:
             bus = await self.ensure_internal_bus()
         tag = self.send_bus_call(bus, path, iface, name, args)
         return await self.assert_bus_reply(tag, expected_reply, bus=bus)
 
-    async def assert_bus_props(self, path: str, iface: str, expected_values: Dict[str, object], bus: Optional[str] = None) -> None:
-        values, = await self.check_bus_call(path, 'org.freedesktop.DBus.Properties', 'GetAll', [iface], bus=bus)
+    async def assert_bus_props(
+        self, path: str, iface: str, expected_values: JsonObject, bus: Optional[str] = None
+    ) -> None:
+        (values,) = await self.check_bus_call(path, 'org.freedesktop.DBus.Properties', 'GetAll', [iface], bus=bus)
         for key, value in expected_values.items():
             assert values[key]['v'] == value
 
-    async def assert_bus_meta(self, path: str, iface: str, expected: Iterable[str], bus: Optional[str] = None) -> None:
+    async def assert_bus_meta(
+        self,
+        path: str,
+        iface: str,
+        expected: Iterable[str],
+        bus: Optional[str] = None,
+    ) -> None:
         if bus is None:
             bus = await self.ensure_internal_bus()
         meta = await self.next_msg(bus)
         assert 'meta' in meta, meta
         assert set(meta['meta'][iface]['properties']) == set(expected)
 
-    async def assert_bus_notify(self, path: str, iface: str, expected: Dict[str, object], bus: Optional[str] = None) -> None:
+    async def assert_bus_notify(
+        self,
+        path: str,
+        iface: str,
+        expected: JsonObject,
+        bus: Optional[str] = None,
+    ) -> None:
         if bus is None:
             bus = await self.ensure_internal_bus()
         notify = await self.next_msg(bus)
         assert 'notify' in notify
         assert notify['notify'][path][iface] == expected
 
-    async def watch_bus(self, path: str, iface: str, expected: Dict[str, object], bus: Optional[str] = None) -> None:
+    async def watch_bus(self, path: str, iface: str, expected: JsonObject, bus: Optional[str] = None) -> None:
         if bus is None:
             bus = await self.ensure_internal_bus()
         tag = self.get_id('watch')
@@ -215,7 +225,14 @@ class MockTransport(asyncio.Transport):
         await self.assert_bus_notify(path, iface, expected, bus)
         await self.assert_msg(bus, id=tag, reply=[])
 
-    async def assert_bus_signal(self, path: str, iface: str, name: str, args: list, bus: Optional[str] = None) -> None:
+    async def assert_bus_signal(
+        self,
+        path: str,
+        iface: str,
+        name: str,
+        args: list,
+        bus: Optional[str] = None,
+    ) -> None:
         if bus is None:
             bus = await self.ensure_internal_bus()
         signal = await self.next_msg(bus)

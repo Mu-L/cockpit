@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,25 +15,24 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from testlib import MachineCase, nondestructive, skipDistroPackage, skipImage, test_main
 import time
+
+import testlib
 
 sleep_crash_list_sel = "#journal-box .cockpit-logline .cockpit-log-message:contains('(sleep) crashed in')"
 
-NO_ABRT = ["debian-*", "ubuntu-*", "fedora-coreos", "rhel*", "centos-*", "arch"]
+ABRT_OS = ["fedora-40"]
 
 
-@skipDistroPackage()
-class TestJournal(MachineCase):
+class TestJournal(testlib.MachineCase):
     def setUp(self):
         super().setUp()
         self.test_start_time = self.machine.execute("date +%s").strip()
 
     def injectExtras(self):
-        self.browser.inject_js("""
+        self.browser.eval_js("""
         ph_get_log_lines = function () {
             var lines = [ ];
             var panels = ph_find('.cockpit-log-panel').childNodes;
@@ -48,7 +47,7 @@ class TestJournal(MachineCase):
                     var count = '';
                     if (e.querySelectorAll('.cockpit-log-service-container').length > 0) {
                         ident = e.querySelector('.cockpit-log-service-reduced').textContent;
-                        count = e.querySelector('.pf-c-badge').textContent;
+                        count = e.querySelector('.pf-v5-c-badge').textContent;
                     } else {
                         ident = e.querySelector('.cockpit-log-service');
                         ident = ident ? ident.textContent : "";
@@ -75,7 +74,6 @@ class TestJournal(MachineCase):
 
     def testBasic(self):
         b = self.browser
-        b.wait_timeout(120)
 
         m = self.machine
 
@@ -125,7 +123,7 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         })""", expected)
 
         def wait_journal_empty():
-            b.wait_in_text(".pf-c-empty-state__body", "Can not find any logs using the current combination of filters.")
+            b.wait_in_text(".pf-v5-c-empty-state__body", "Can not find any logs using the current combination of filters.")
 
         b.go("#/?priority=debug&service=log123.service")
         wait_journal_empty()
@@ -181,16 +179,9 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         wait_journal_empty()
 
         def wait_slow10():
-            systemd_version = int(m.execute("systemctl --version | awk '{print $2; exit}'").strip())
-
-            if systemd_version >= 248:
-                # changed in https://github.com/systemd/systemd/commit/f5ec78e503
-                stop_message = "Deactivated successfully."
-            else:
-                stop_message = "Succeeded."
-
-            wait_log_lines([["systemd", "slow10.service: " + stop_message, ""], ["sh", "SLOW", "10"],
-                            ["systemd", "Started.*Slowly log 10 identical lines.", ""]])
+            with b.wait_timeout(30):
+                wait_log_lines([["systemd", "slow10.service: Deactivated successfully.", ""], ["sh", "SLOW", "10"],
+                                ["systemd", "Started.*Slowly log 10 identical lines.", ""]])
 
         def wait_log_present(message):
             b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{message}')")
@@ -215,25 +206,42 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         wait_log_present("JUST ERROR")
 
         # We cannot open this select with tests but we need to wait until it gets loaded
-        b.select_PF4("#journal-identifier-menu .pf-c-select__toggle", "just-a-service")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", "just-a-service")
         wait_log_not_present("JUST ERROR")
         wait_log_present("THE SERVICE")
-        b.select_PF4("#journal-identifier-menu .pf-c-select__toggle", "All")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", "All")
         wait_log_present("JUST ERROR")
         wait_log_present("THE SERVICE")
 
-        self.browser.select_PF4("#journal-prio-menu", "Error and above")
+        b.select_PF("#journal-prio-menu", "Error and above")
         wait_log_not_present("THE SERVICE")
         wait_log_present("JUST ERROR")
-        b.select_PF4("#journal-identifier-menu .pf-c-select__toggle", "check-journal")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", "check-journal")
         b.wait_not_present("#journal-identifier-menu + ul button:contains('just-a-service')")
 
         b.go("#/?tag=test-stream&priority=notice")
         wait_journal_empty()
 
+        # Verify the filter panel
+        b.assert_pixels("#journal", "journal-filters-panel", skip_layouts=["mobile"])
+
         # Test inline help
         b.click("#journal-grep button[aria-label='Open advanced search']")
         b.wait_val("#journal-cmd-copy input", "journalctl --no-tail --since=-24hours --priority=notice --reverse -- SYSLOG_IDENTIFIER=test-stream")
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.wait_not_present("#journal-cmd-copy")
+
+        # Test popover in advanced search
+        b.click("#journal-grep button[aria-label='Open advanced search']")
+        b.assert_pixels(".pf-v5-c-panel", "logs-filter-panel", skip_layouts=["mobile"])
+
+        b.click(".pf-v5-c-form__group:contains('Since') button")
+        b.wait_text(".pf-v5-c-popover__title-text", "Start showing entries on or newer than the specified date.")
+        # FIXME: Closing the popover with the X button also closes the whole search form (just not with ph_mouse)
+        # b.click(".pf-v5-c-popover__close button")
+        # Thus close the popover the same way as we opened it, with the (i) icon
+        b.click(".pf-v5-c-form__group:contains('Since') button")
+        b.wait_not_present(".pf-v5-c-popover")
         b.click("#journal-grep button[aria-label='Open advanced search']")
         b.wait_not_present("#journal-cmd-copy")
 
@@ -260,7 +268,8 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         # Test message filtering
 
         b.focus("#journal-grep input")
-        b.key_press("1")
+
+        b.input_text("1")
         b.click("#journal-grep button[aria-label=Search]")
 
         b.wait_js_cond('window.location.hash === "#/?priority=notice&tag=test-stream&grep=1"')
@@ -269,7 +278,8 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
 
         b.focus("#journal-grep input")
-        b.key_press("\bm.*[2-5]")
+        b.key("Backspace")
+        b.input_text("m.*[2-5]")
         b.click("#journal-grep button[aria-label=Search]")
         b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 1')")
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 2')")
@@ -286,7 +296,7 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
 
         b.focus("#journal-grep input")
-        b.key_press("FOO=bar [5-6]")
+        b.input_text("FOO=bar [5-6]")
         b.click("#journal-grep button[aria-label=Search]")
         b.wait_val("#journal-grep input", "priority:err identifier:logger FOO=bar [5-6]")
 
@@ -295,28 +305,30 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
 
         b.focus("#journal-grep input")
-        b.key_press("\b" * 13 + "[5-6]")
+        b.key("Backspace", 13)
+        b.input_text("[5-6]")
         b.click("#journal-grep button[aria-label=Search]")
         b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 4')")
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
 
         # Test filters
-        b.select_PF4("#logs-predefined-filters", "Current boot")
+        b.select_PF("#logs-predefined-filters", "Current boot")
         b.wait_val("#journal-grep input", "priority:err identifier:logger boot:0 [5-6]")
 
-        b.select_PF4("#logs-predefined-filters", "Previous boot")
+        b.select_PF("#logs-predefined-filters", "Previous boot")
         b.wait_val("#journal-grep input", "priority:err identifier:logger boot:-1 [5-6]")
 
-        b.select_PF4("#logs-predefined-filters", "Last 24 hours")
+        b.select_PF("#logs-predefined-filters", "Last 24 hours")
         b.wait_val("#journal-grep input", "priority:err identifier:logger since:-24hours [5-6]")
 
-        b.select_PF4("#logs-predefined-filters", "Last 7 days")
+        b.select_PF("#logs-predefined-filters", "Last 7 days")
         b.wait_val("#journal-grep input", "priority:err identifier:logger since:-7days [5-6]")
 
         # Check that 'until' qualifier keeps streaming until given time
         b.focus("#journal-grep input")
-        b.key_press("\b\b\b\b6-9] until:+15s")
+        b.key("Backspace", 4)
+        b.input_text("6-9] until:+15s")
         b.click("#journal-grep button[aria-label=Search]")
         b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 5')")
         b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 6')")
@@ -328,6 +340,40 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.wait_not_present("#journal-box .cockpit-logline .cockpit-log-message:contains('Message 8')")
 
         self.allow_journal_messages(".*Data from the specified boot .* is not available: No such boot ID in journal.*")
+
+    @testlib.nondestructive
+    def testIdentifierReloading(self):
+        """
+        Test verifies https://github.com/cockpit-project/cockpit/issues/20123
+        Updating Identifiers when changing priorities
+        """
+        b = self.browser
+        m = self.machine
+        tag_error = "check-error-inside"
+        tag_info = "check-info-inside"
+        m.execute(f"logger -p user.err --tag {tag_error} {tag_error.upper()}")
+        m.execute(f"logger -p 5 --tag {tag_info} {tag_info.upper()}")
+        self.login_and_go("/system/logs")
+
+        b.go(f"#/?priority=err&since=@{self.test_start_time}")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_not_present(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", tag_error)
+        b.wait_not_present(f"#journal-identifier-menu + ul button:contains('{tag_info}')")
+
+        b.select_PF("#journal-prio-menu", "Debug and above")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", "All")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", tag_error)
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", tag_info)
+
+        b.select_PF("#journal-prio-menu", "Error and above")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", "All")
+        b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_error.upper()}')")
+        b.wait_not_present(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{tag_info.upper()}')")
+        b.select_PF("#journal-identifier-menu .pf-v5-c-menu-toggle__button", tag_error)
+        b.wait_not_present(f"#journal-identifier-menu + ul button:contains('{tag_info}')")
 
     def testRebootAndTime(self):
         b = self.browser
@@ -363,7 +409,7 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         self.login_and_go("/system/logs")
 
         self.injectExtras()
-        b.inject_js("""
+        b.eval_js("""
             localTime = function(time) {
                 var month_names = [
                     'January',
@@ -394,7 +440,7 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         m.execute("systemctl stop systemd-journald.service")
 
         # Now reboot things
-        m.reboot()
+        self.reboot()
         m.execute("timedatectl set-time '2037-01-01 00:05:00'")
         m.execute("logger -p user.err --tag check-journal AFTER BOOT")
 
@@ -446,15 +492,15 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
                         ])
 
         b.focus("#journal-grep input")
-        b.key_press("until:2037-01-01\\ 00:03")
+        b.input_text("until:2037-01-01\\ 00:03")
         b.click("#journal-grep button[aria-label=Search]")
         wait_log_lines([expected_date,
                         ["check-journal", "BEFORE BOOT", ""],
                         "Load earlier entries"
                         ])
 
-        b.click("#journal-identifier-menu .pf-c-select__toggle")
-        b.wait_visible("#journal-identifier-menu .pf-c-select__toggle + ul button:contains('check-journal')")
+        b.click("#journal-identifier-menu .pf-v5-c-menu-toggle__button")
+        b.wait_visible("#journal-identifier-menu ul button:contains('check-journal')")
 
         # New messages are not streamed when 'until' is in the past
         m.execute("logger -p user.err --tag check-journal RIGHT NOW")
@@ -464,27 +510,33 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
                         "Load earlier entries"
                         ])
 
-    @nondestructive
+    @testlib.nondestructive
     def testBinary(self):
         b = self.browser
         m = self.machine
-
-        m.execute(r"printf 'MESSAGE=Hello \01 World\nPRIORITY=3\nFOO=bar\nBIN=a\01b\02c\03\n' | logger --journald")
-        self.login_and_go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
-        b.click("#journal-box .cockpit-logline .cockpit-log-message:contains('[13 bytes of binary data]')")
-        b.wait_text(".pf-c-card__title", "[13 bytes of binary data]")
+        bin_data_long = {"MSG": (r"Hel\01" * 250) + "a", "BIN": (r"Hel\01" * 250) + "a"}
+        bin_data_short = {"MSG": "Hello \01 World", "BIN": "a\01b\02c\03"}
 
         def wait_field(name, value):
             row_sel = "dt:contains('" + name + "')"
             b.wait_visible(row_sel + "+ dd:contains('" + value + "')")
 
-        wait_field("FOO", "bar")
-        wait_field("BIN", "[6 bytes of binary data]")
+        def check_entry(msg, bin_msg):
+            b.click(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{msg}')")
+            b.wait_text(".pf-v5-c-card__title", msg)
+            wait_field("FOO", "bar")
+            wait_field("BIN", bin_msg)
+            b.click('.pf-v5-c-breadcrumb li:first-of-type')
+            b.wait_visible(f"#journal-box .cockpit-logline .cockpit-log-message:contains('{msg}')")
 
-        b.click('.pf-c-breadcrumb li:first')
-        b.wait_visible("#journal-box .cockpit-logline .cockpit-log-message:contains('[13 bytes of binary data]')")
+        m.execute(fr"printf 'MESSAGE={bin_data_short['MSG']}\nPRIORITY=3\nFOO=bar\nBIN={bin_data_short['BIN']}\n' | logger --journald")
+        self.login_and_go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
+        check_entry(bin_data_short["MSG"], "[binary data]")  # Test when binary msg is <= 1000 bytes
+        m.execute(fr"printf 'MESSAGE={bin_data_long['MSG']}\nPRIORITY=3\nFOO=bar\nBIN={bin_data_long['BIN']}\n' | logger --journald")
+        b.go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
+        check_entry("[binary data]", "[binary data]")  # Test when binary msg is > 1000 bytes
 
-    @nondestructive
+    @testlib.nondestructive
     def testNoMessage(self):
         b = self.browser
         m = self.machine
@@ -492,9 +544,9 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         m.execute(r"printf 'PRIORITY=3\nFOO=bar\n' | logger --journald")
         self.login_and_go("/system/logs#/?tag=logger&since=@" + self.test_start_time)
         b.click("#journal-box .cockpit-logline .cockpit-log-message:contains('[no data]')")
-        b.wait_text(".pf-c-card__title", "[no data]")
+        b.wait_text(".pf-v5-c-card__title", "[no data]")
 
-    @nondestructive
+    @testlib.nondestructive
     def testLogLevel(self):
 
         b = self.browser
@@ -508,23 +560,23 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
 
         journal_line_selector = "#journal-box .cockpit-logline:has(span:contains({0}))"
 
-        self.browser.select_PF4("#journal-prio-menu", "Only emergency")
+        b.select_PF("#journal-prio-menu", "Only emergency")
         b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
         b.wait_not_present(journal_line_selector.format("WARNING_MESSAGE"))
         b.wait_not_present(journal_line_selector.format("INFO_MESSAGE"))
 
-        self.browser.select_PF4("#journal-prio-menu", "Warning and above")
+        b.select_PF("#journal-prio-menu", "Warning and above")
         b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
         b.wait_visible(journal_line_selector.format("WARNING_MESSAGE"))
         b.wait_not_present(journal_line_selector.format("INFO_MESSAGE"))
 
-        self.browser.select_PF4("#journal-prio-menu", "Info and above")
+        b.select_PF("#journal-prio-menu", "Info and above")
         b.wait_visible(journal_line_selector.format("EMERGENCY_MESSAGE"))
         b.wait_visible(journal_line_selector.format("WARNING_MESSAGE"))
         b.wait_visible(journal_line_selector.format("INFO_MESSAGE"))
 
-    @skipImage("ABRT not available", *NO_ABRT)
-    @nondestructive
+    @testlib.onlyImage("ABRT not available", *ABRT_OS)
+    @testlib.nondestructive
     def testAbrtSegv(self):
         b = self.browser
         m = self.machine
@@ -535,13 +587,13 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
 
         self.login_and_go("/system/logs#/?since=@" + self.test_start_time)
 
-        self.browser.select_PF4("#journal-prio-menu", "Critical and above")
+        b.select_PF("#journal-prio-menu", "Critical and above")
         b.wait_visible(sleep_crash_list_sel)
 
-        self.browser.select_PF4("#journal-prio-menu", "Alert and above")
+        b.select_PF("#journal-prio-menu", "Alert and above")
         b.wait_not_present(sleep_crash_list_sel)
 
-        self.browser.select_PF4("#journal-prio-menu", "Critical and above")
+        b.select_PF("#journal-prio-menu", "Critical and above")
         b.click(sleep_crash_list_sel)
 
         def wait_field(name, value):
@@ -553,11 +605,11 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.click("button:contains(Problem info)")
         wait_field("reason", "killed by SIGSEGV")
         b.click("button:contains(Problem details)")
-        b.click("#abrt-details .pf-c-accordion__toggle:contains('core_backtrace')")
-        b.wait_visible("#abrt-details .pf-c-accordion__expanded-content-body dt:contains('signal') + dd:contains('11')")
+        b.click("#abrt-details .pf-v5-c-accordion__toggle:contains('core_backtrace')")
+        b.wait_visible("#abrt-details .pf-v5-c-accordion__expandable-content.pf-m-expanded dt:contains('signal') + dd:contains('11')")
 
-    @skipImage("ABRT not available", *NO_ABRT)
-    @nondestructive
+    @testlib.onlyImage("ABRT not available", *ABRT_OS)
+    @testlib.nondestructive
     def testAbrtDelete(self):
         b = self.browser
         m = self.machine
@@ -584,11 +636,11 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.wait_in_text("#entry-heading", "sleep")
         # details view should hide log view
         b.wait_not_present("h2:contains('Crash reporting')")
-        b.wait_visible(".pf-c-card__title:contains('(sleep) crashed in')")
+        b.wait_visible(".pf-v5-c-card__title:contains('(sleep) crashed in')")
         b.wait_not_present("button.pf-m-danger:contains('Delete')")
 
-    @skipImage("ABRT not available", *NO_ABRT)
-    @nondestructive
+    @testlib.onlyImage("ABRT not available", *ABRT_OS)
+    @testlib.nondestructive
     def testAbrtReport(self):
         # The testing server is located at verify/files/mock-faf-server.py
         # Adjust Handler.known for for the expected succession of known/unknown problems
@@ -599,7 +651,7 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         self.addCleanup(m.execute, "rm -rf /var/spool/abrt/*")
 
         # Restarting the reportd service will trigger some errors. Some depend
-        # on timing (interrupting the GetWorkflows call), so let’s ignore some
+        # on timing (interrupting the GetWorkflows call), so let's ignore some
         # variations of the same thing.
         self.allow_journal_messages('.*Remote peer disconnected')
         self.allow_browser_errors('.*Failed to get workflows for problem .*: disconnected')
@@ -624,8 +676,8 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
 
         self.login_and_go("/system/logs#/?since=@" + self.test_start_time)
         b.click(sleep_crash_list_sel)
-        b.click("#abrt-reporting .pf-l-split:first-child button:contains('Report')")
-        b.wait_visible("#abrt-reporting .pf-l-split:first-child a[href$='/reports/bthash/123deadbeef']")
+        b.click("#abrt-reporting .pf-v5-l-split:first-child button:contains('Report')")
+        b.wait_visible("#abrt-reporting .pf-v5-l-split:first-child a[href$='/reports/bthash/123deadbeef']")
 
         # "Unreport" the problem to test reporting unknown problem
         m.execute('find /var/spool/abrt -name "reported_to" -or -name "ureports_counter" | xargs rm')
@@ -638,21 +690,21 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         b.reload()
         b.enter_page("/system/logs")
 
-        b.click("#abrt-reporting .pf-l-split:contains('Report to Cockpit') button:contains('Report')")
+        b.click("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') button:contains('Report')")
 
         test_user = 'correcthorsebatterystaple'
 
         # Since libreport version `2.15.2-7` bugzilla plugin only requires API key
-        b.wait_visible(".pf-c-modal-box__body input[type='password']")
-        b.set_val(".pf-c-modal-box__body input", test_user)
-        b.click(".pf-c-modal-box__footer button:contains('Send')")
+        b.wait_visible(".pf-v5-c-modal-box__body input[type='password']")
+        b.set_val(".pf-v5-c-modal-box__body input", test_user)
+        b.click(".pf-v5-c-modal-box__footer button:contains('Send')")
 
-        b.wait_not_present(".pf-c-modal-box__body p:contains('Password')")
-        b.click(".pf-c-modal-box__footer button:contains('No')")
-        b.wait_visible("#abrt-reporting .pf-l-split:contains('Report to Cockpit') a[href='https://bugzilla.example.com/show_bug.cgi?id=123456']")
+        b.wait_not_present(".pf-v5-c-modal-box__body p:contains('Password')")
+        b.click(".pf-v5-c-modal-box__footer button:contains('No')")
+        b.wait_visible("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') a[href='https://bugzilla.example.com/show_bug.cgi?id=123456']")
 
-    @skipImage("ABRT not available", *NO_ABRT)
-    @nondestructive
+    @testlib.onlyImage("ABRT not available", *ABRT_OS)
+    @testlib.nondestructive
     def testAbrtReportCancel(self):
         b = self.browser
         m = self.machine
@@ -681,13 +733,13 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
         self.login_and_go("/system/logs#/?since=@" + self.test_start_time)
 
         b.click(sleep_crash_list_sel)
-        b.click("#abrt-reporting .pf-l-split:contains('Report to Cockpit') button:contains('Report')")
-        b.wait_visible("#abrt-reporting .pf-l-split:contains('Report to Cockpit') .pf-l-split__item:contains('Cancel me')")
-        b.click("#abrt-reporting .pf-l-split:contains('Report to Cockpit') button:contains('Cancel')")
-        b.wait_visible("#abrt-reporting .pf-l-split:contains('Report to Cockpit') .pf-l-split__item:contains('Reporting was canceled')")
+        b.click("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') button:contains('Report')")
+        b.wait_visible("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') .pf-v5-l-split__item:contains('Cancel me')")
+        b.click("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') button:contains('Cancel')")
+        b.wait_visible("#abrt-reporting .pf-v5-l-split:contains('Report to Cockpit') .pf-v5-l-split__item:contains('Reporting was canceled')")
 
-    @skipImage("ABRT not available", *NO_ABRT)
-    @nondestructive
+    @testlib.onlyImage("ABRT not available", *ABRT_OS)
+    @testlib.nondestructive
     def testAbrtReportNoReportd(self):
         b = self.browser
         m = self.machine
@@ -711,9 +763,9 @@ ExecStart=/bin/sh -c 'sleep 5; for s in $(seq 10); do echo SLOW; sleep 0.1; done
 
         self.login_and_go("/system/logs#/?since=@" + self.test_start_time)
         b.click(sleep_crash_list_sel)
-        b.click("#abrt-reporting .pf-l-split:first-child button:contains('Report')")
-        b.wait_visible("#abrt-reporting .pf-l-split:first-child a[href$='/reports/bthash/123deadbeef']")
+        b.click("#abrt-reporting .pf-v5-l-split:first-child button:contains('Report')")
+        b.wait_visible("#abrt-reporting .pf-v5-l-split:first-child a[href$='/reports/bthash/123deadbeef']")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

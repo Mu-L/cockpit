@@ -1,3 +1,0 @@
-usr/share/cockpit/playground
-lib/systemd/system/cockpit-session.socket
-lib/systemd/system/cockpit-session@.service

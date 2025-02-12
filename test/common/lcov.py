@@ -1,4 +1,4 @@
-#! /usr/bin/python
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,7 +15,7 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 # This module can convert profile data from CDP to LCOV, produce a
 # HTML report, and post review comments.
@@ -23,17 +23,19 @@
 # - write_lcov (coverage_data, outlabel)
 # - create_coverage_report()
 
-import json
-import os
-import sys
 import glob
 import gzip
-import subprocess
+import itertools
+import json
+import os
 import re
-
+import shutil
+import subprocess
+import sys
+import urllib.parse
 from bisect import bisect_left
+from typing import Any, Mapping, Sequence
 
-import parent  # NOQA: imported through a custom PYTHONPATH
 from task import github
 
 BASE_DIR = os.path.realpath(f'{__file__}/../../..')
@@ -45,9 +47,9 @@ debug = False
 # "BSD-2-Clause License"
 
 # Mapping of base64 letter -> integer value.
-B64 = dict((c, i) for i, c in
-           enumerate('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-                     '0123456789+/'))
+B64 = {c: i for i, c in
+       enumerate('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+                 '0123456789+/')}
 
 
 def parse_vlq(segment):
@@ -81,7 +83,7 @@ def parse_vlq(segment):
     return values
 
 
-def parse_sourcemap(f, line_starts, webpack_name):
+def parse_sourcemap(f, line_starts, dir_name):
     smap = json.load(f)
     sources = smap['sources']
     mappings = smap['mappings']
@@ -91,10 +93,18 @@ def parse_sourcemap(f, line_starts, webpack_name):
 
     our_sources = set()
     for s in sources:
-        if "node_modules" not in s and (s.endswith(".js") or s.endswith(".jsx")):
-            our_sources.add(s)
+        # reject any absolute paths or URLs (like webpack://)
+        if not s.startswith('../'):
+            continue
+        # don't generate coverage for node_modules/ code
+        if "node_modules" in s:
+            continue
+        # and only for these file types...
+        if not s.endswith(('.js', '.jsx', '.ts', '.tsx')):
+            continue
+        our_sources.add(s)
 
-    dst_col, src_id, src_line, src_col = 0, 0, 0, 0
+    dst_col, src_id, src_line = 0, 0, 0
     for dst_line, line in enumerate(lines):
         segments = line.split(',')
         dst_col = 0
@@ -109,23 +119,22 @@ def parse_sourcemap(f, line_starts, webpack_name):
                 src_id += parse[1]
                 src = sources[src_id]
                 src_line += parse[2]
-                src_col += parse[3]
 
             if src in our_sources:
-                norm_src = os.path.normpath(src.replace(f"webpack://{webpack_name}/", ""))
+                norm_src = os.path.normpath(os.path.join(dir_name, src))
                 our_map.append((line_starts[dst_line] + dst_col, norm_src, src_line))
 
     return our_map
 
 
 class DistFile:
-    def __init__(self, path, webpack_name):
+    def __init__(self, path):
         line_starts = [0]
         with open(path, newline='') as f:
             for line in f.readlines():
                 line_starts.append(line_starts[-1] + len(line))
         with open(path + ".map") as f:
-            self.smap = parse_sourcemap(f, line_starts, webpack_name)
+            self.smap = parse_sourcemap(f, line_starts, os.path.relpath(os.path.dirname(path), BASE_DIR))
 
     def find_sources_slow(self, start, end):
         res = []
@@ -158,7 +167,13 @@ def get_dist_map(package):
     return dmap
 
 
-def get_distfile(url, dist_map, webpack_name):
+def get_distfile(url, dist_map):
+    path = urllib.parse.urlparse(url).path
+    if path.startswith('/qunit/'):
+        relpath = path[1:]
+        if os.path.exists(relpath) and os.path.exists(f'{relpath}.map'):
+            return DistFile(path[1:])
+
     parts = url.split("/")
     if len(parts) < 3 or "cockpit" not in parts:
         return None
@@ -172,7 +187,7 @@ def get_distfile(url, dist_map, webpack_name):
     else:
         path = f"{BASE_DIR}/dist/" + base + "/" + file
     if os.path.exists(path) and os.path.exists(path + ".map"):
-        return DistFile(path, webpack_name)
+        return DistFile(path)
     else:
         sys.stderr.write(f"SKIP {url} -> {path}\n")
         return None
@@ -222,7 +237,7 @@ def print_file_coverage(path, line_hits, out):
     for i in range(len(line_hits)):
         if line_hits[i] is not None:
             lines_found += 1
-            out.write(f"DA:{i+1},{line_hits[i]}\n")
+            out.write(f"DA:{i + 1},{line_hits[i]}\n")
             if line_hits[i] > 0:
                 lines_hit += 1
     out.write(f"LH:{lines_hit}\n")
@@ -262,7 +277,7 @@ class DiffMap:
         return None
 
     def find_source(self, diff_line):
-        return self.source_map[diff_line]
+        return self.source_map.get(diff_line)
 
 
 def print_diff_coverage(path, file_hits, out):
@@ -288,12 +303,12 @@ def print_diff_coverage(path, file_hits, out):
     out.write("end_of_record\n")
 
 
-def write_lcov(covdata, outlabel):
+def write_lcov(covdata: Sequence[Mapping[str, str]], outlabel: str) -> None:
 
     with open(f"{BASE_DIR}/package.json") as f:
         package = json.load(f)
     dist_map = get_dist_map(package)
-    file_hits = {}
+    file_hits: Any = {}
 
     def covranges(functions):
         for f in functions:
@@ -367,11 +382,11 @@ def write_lcov(covdata, outlabel):
     # from each mention.
 
     for script in covdata:
-        distfile = get_distfile(script['url'], dist_map, package["name"])
+        distfile = get_distfile(script['url'], dist_map)
         if distfile:
             ranges = sorted(covranges(script['functions']),
                             key=lambda r: r['endOffset'] - r['startOffset'], reverse=True)
-            hits = {}
+            hits: Any = {}
             for r in ranges:
                 record_range(hits, r, distfile)
             merge_hits(file_hits, hits)
@@ -399,7 +414,7 @@ def get_review_comments(diff_info_file):
         # Don't complain about lines that contain only punctuation, or
         # nothing but "else".  We don't seem to get reliable
         # information for them.
-        if not re.search('[a-zA-Z0-9]', text.replace("else", "")):
+        if not re.search(r'[a-zA-Z0-9]', text.replace("else", "")):
             return False
         return True
 
@@ -426,7 +441,10 @@ def get_review_comments(diff_info_file):
             if line.startswith("DA:"):
                 parts = line[3:].split(",")
                 if int(parts[1]) == 0:
-                    (src, line, text) = dm.find_source(int(parts[0]))
+                    info = dm.find_source(int(parts[0]))
+                    if not info:
+                        continue
+                    (src, line, text) = info
                     if not is_interesting_line(text):
                         continue
                     if src == cur_src and line == cur_line + 1:
@@ -444,52 +462,60 @@ def get_review_comments(diff_info_file):
 def prepare_for_code_coverage():
     # This gives us a convenient link at the top of the logs, see link-patterns.json
     print("Code coverage report in Coverage/index.html")
+    if os.path.exists("lcov"):
+        shutil.rmtree("lcov")
+    os.makedirs("lcov")
+    # Detect the default branch to compare with, Anaconda still uses master as main.
+    branch = "main"
     try:
-        os.makedirs("lcov", exist_ok=True)
-        with open("lcov/github-pr.diff", "w") as f:
-            subprocess.check_call(["git", "-c", "diff.noprefix=false", "diff", "--patience", "main"], stdout=f)
-    except subprocess.CalledProcessError:
-        pass
+        subprocess.check_call(["git", "rev-parse", "--quiet", "--verify", branch], stdout=subprocess.DEVNULL)
+    except subprocess.SubprocessError:
+        branch = "master"
+    with open("lcov/github-pr.diff", "w") as f:
+        subprocess.check_call(["git", "-c", "diff.noprefix=false", "diff", "--patience", branch], stdout=f)
 
 
-def create_coverage_report():
+def create_coverage_report() -> None:
     output = os.environ.get("TEST_ATTACHMENTS", BASE_DIR)
     lcov_files = glob.glob(f"{BASE_DIR}/lcov/*.info.gz")
     try:
-        title = os.path.basename(subprocess.check_output(["git", "remote", "get-url", "origin"]))
+        title = os.path.basename(subprocess.check_output(["git", "remote", "get-url", "origin"])).decode().strip()
     except subprocess.CalledProcessError:
         title = "?"
     if len(lcov_files) > 0:
-        try:
-            all_file = f"{BASE_DIR}/lcov/all.info"
-            diff_file = f"{BASE_DIR}/lcov/diff.info"
-            subprocess.check_call(["lcov", "--quiet", "--output", all_file] +
-                                  sum(map(lambda f: ["--add", f], lcov_files), []))
-            subprocess.check_call(["lcov", "--quiet", "--output", diff_file,
-                                   "--extract", all_file, "*/github-pr.diff"])
-            summary = subprocess.check_output(["genhtml", "--no-function-coverage",
-                                               "--prefix", os.getcwd(),
-                                               "--title", title,
-                                               "--output-dir", f"{output}/Coverage", all_file]).decode()
+        all_file = f"{BASE_DIR}/lcov/all.info"
+        diff_file = f"{BASE_DIR}/lcov/diff.info"
+        excludes = []
+        # Exclude pkg/lib in Cockpit projects such as podman/machines.
+        if title != "cockpit.git" and title != "cockpit":
+            excludes = ["--exclude", "pkg/lib"]
+        subprocess.check_call(["lcov", "--quiet", "--output", all_file, *excludes,
+                               *itertools.chain(*[["--add", f] for f in lcov_files])])
+        subprocess.check_call(["lcov", "--quiet", "--ignore-errors", "empty,empty,unused,unused", "--output", diff_file,
+                               "--extract", all_file, "*/github-pr.diff"])
+        summary = subprocess.check_output(["genhtml", "--no-function-coverage",
+                                           "--prefix", os.getcwd(),
+                                           "--title", title,
+                                           "--output-dir", f"{output}/Coverage", all_file]).decode()
 
-            coverage = summary.split("\n")[-2]
-            match = re.search(r".*lines\.*:\s*([\d\.]*%).*", coverage)
-            if match:
-                print("Overall line coverage:", match.group(1))
+        coverage = summary.split("\n")[-2]
+        match = re.search(r".*lines\.*:\s*([\d\.]*%).*", coverage)
+        if match:
+            print("Overall line coverage:", match.group(1))
 
-            comments = get_review_comments(diff_file)
-            rev = os.environ.get("TEST_REVISION", None)
-            pull = os.environ.get("TEST_PULL", None)
-            if rev and pull:
-                api = github.GitHub()
-                old_comments = api.get(f"pulls/{pull}/comments?sort=created&direction=desc&per_page=100") or []
-                for oc in old_comments:
-                    if ("body" in oc and "path" in oc and "line" in oc and
-                       "not executed by any test." in oc["body"]):
-                        api.delete(f"pulls/comments/{oc['id']}")
-                if len(comments) > 0:
-                    api.post(f"pulls/{pull}/reviews",
-                             {"commit_id": rev, "event": "COMMENT",
-                              "comments": comments})
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to create coverage report: {e}")
+        comments = get_review_comments(diff_file)
+        rev = os.environ.get("TEST_REVISION", None)
+        pull = os.environ.get("TEST_PULL", None)
+        if rev and pull:
+            api = github.GitHub()
+            old_comments = api.get(f"pulls/{pull}/comments?sort=created&direction=desc&per_page=100") or []
+            for oc in old_comments:
+                if ("body" in oc and "path" in oc and "line" in oc and
+                   "not executed by any test." in oc["body"]):
+                    api.delete(f"pulls/comments/{oc['id']}")
+            if len(comments) > 0:
+                api.post(f"pulls/{pull}/reviews",
+                         {"commit_id": rev, "event": "COMMENT",
+                          "comments": comments})
+    else:
+        sys.stderr.write("Error: no code coverage files generated\n")

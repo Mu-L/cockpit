@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 #include "config.h"
@@ -270,8 +270,13 @@ main (int argc,
         }
       else
         {
-          const gchar *args[] = { opt_local_session, NULL };
-          pipe = cockpit_pipe_spawn (args, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
+          g_auto(GStrv) args = NULL;
+          if (!g_shell_parse_argv (opt_local_session, NULL, &args, &error))
+            {
+              g_prefix_error (&error, "--local-session: ");
+              goto out;
+            }
+          pipe = cockpit_pipe_spawn ((const gchar **) args, NULL, NULL, COCKPIT_PIPE_FLAGS_NONE);
         }
 
       /* Spawn a local session as a bridge */

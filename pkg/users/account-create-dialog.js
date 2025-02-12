@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from 'cockpit';
@@ -23,7 +23,7 @@ import React from 'react';
 import { Bullseye } from "@patternfly/react-core/dist/esm/layouts/Bullseye/index.js";
 import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox/index.js";
 import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
-import { Select, SelectOption, SelectVariant } from "@patternfly/react-core/dist/esm/components/Select/index.js";
+import { FormSelect, FormSelectOption } from "@patternfly/react-core/dist/esm/components/FormSelect/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 import { Popover } from "@patternfly/react-core/dist/esm/components/Popover/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
@@ -31,6 +31,7 @@ import { Radio } from "@patternfly/react-core/dist/esm/components/Radio/index.js
 import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
 import { has_errors, is_valid_char_name } from "./dialog-utils.js";
 import { passwd_change } from "./password-dialogs.js";
+import { FormHelper } from "cockpit-components-form-helper";
 import { password_quality, PasswordFormFields } from "cockpit-components-password.jsx";
 import { show_modal_dialog, apply_modal_dialog } from "cockpit-components-dialog.jsx";
 import { HelpIcon } from '@patternfly/react-icons';
@@ -47,81 +48,86 @@ function AccountCreateBody({ state, errors, change, shells }) {
     const {
         real_name, user_name,
         locked, change_passw_force,
-        shell, isShellSelectExpanded,
+        shell,
     } = state;
+
+    // We want to let user know that password and confirmation password do not match without them having to constantly click on "Create" to validate the form.
+    // But we also don't want to show an error message while they are typing the confirmation password, only when they are finished typing it.
+    // To solve the issue of telling that user is finished writing the confirmation password, let's do the following:
+    // The dialog does not validate if passwords match until:
+    //     1. they are at least the same length (which signals user has finished typing)
+    // OR
+    //     2. user submits the form (which also signals they are finished typing)
+    // Once that happens, and passwords do not match, the confirm password is validated after each keystroke.
+    let dynamic_password_confirm_error;
+    if (state.password_confirm_dirty)
+        dynamic_password_confirm_error = validate_password_confirm(state.password_confirm, state.password);
 
     return (
         <Form isHorizontal onSubmit={apply_modal_dialog}>
             <FormGroup label={_("Full name")}
-                       helperTextInvalid={errors?.real_name}
-                       validated={(errors?.real_name) ? "error" : "default"}
                        fieldId="accounts-create-real-name">
                 <TextInput id="accounts-create-real-name"
                            validated={(errors?.real_name) ? "error" : "default"}
-                           value={real_name} onChange={value => change("real_name", value)} />
+                           value={real_name} onChange={(_event, value) => change("real_name", value)} />
+                <FormHelper fieldId="accounts-create-real-name" helperTextInvalid={errors?.real_name} />
             </FormGroup>
 
             <FormGroup label={_("User name")}
-                       helperTextInvalid={errors?.user_name}
-                       validated={(errors?.user_name) ? "error" : "default"}
                        fieldId="accounts-create-user-name">
                 <TextInput id="accounts-create-user-name"
                            validated={(errors?.user_name) ? "error" : "default"}
-                           value={user_name} onChange={value => change("user_name", value)} />
+                           value={user_name} onChange={(_event, value) => change("user_name", value)} />
+                <FormHelper fieldId="accounts-create-user-name" helperTextInvalid={errors?.user_name} />
             </FormGroup>
 
             <FormGroup label={_("Home directory")}
-                       helperTextInvalid={errors && errors.home_dir}
-                       validated={(errors && errors.home_dir) ? "error" : "default"}
                        fieldId="accounts-create-user-home-dir">
                 <TextInput id="accounts-create-user-home-dir"
-                    onChange={value => change("home_dir", value)}
+                    onChange={(_event, value) => change("home_dir", value)}
                     placeholder={_("Path to directory")}
                     value={state.home_dir} />
+                <FormHelper fieldId="accounts-create-user-home-dir" helperTextInvalid={errors?.home_dir} />
             </FormGroup>
 
             <FormGroup label={_("Shell")}
                        fieldId="accounts-create-user-shell">
-                <Select variant={SelectVariant.single}
-                        toggleId="accounts-create-user-shell"
-                        onToggle={statusIsExpanded => change("isShellSelectExpanded", statusIsExpanded)}
-                        onSelect={(event, selection) => { change("shell", selection); change("isShellSelectExpanded", false) }}
-                        selections={shell}
-                        isOpen={isShellSelectExpanded}
-                        aria-labelledby="vm-state-select"
-                        menuAppendTo="parent">
-                    { shells.map(shell_path => <SelectOption value={shell_path} key={shell_path} label={shell_path}>{shell_path}</SelectOption>) }
-                </Select>
+                <FormSelect
+                        data-selected={shell}
+                        id="accounts-create-user-shell"
+                        onChange={(_, selection) => { change("shell", selection) }}
+                        value={shell}>
+                    { shells.map(shell_path => <FormSelectOption key={shell_path} value={shell_path} label={shell_path} />) }
+                </FormSelect>
             </FormGroup>
 
             <FormGroup label={_("User ID")}
-                       helperTextInvalid={errors && errors.uid}
-                       validated={errors?.uid ? "error" : "default"}
                        fieldId="accounts-create-user-uid">
                 <TextInput id="accounts-create-user-uid"
-                    onChange={value => change("uid", value)}
+                    onChange={(_event, value) => change("uid", value)}
                     value={state.uid} />
+                <FormHelper fieldId="accounts-create-user-uid" helperTextInvalid={errors?.uid} />
             </FormGroup>
 
             <FormGroup label={_("Authentication")} fieldId="accounts-create-locked" hasNoPaddingTop>
                 <Radio id="account-use-password"
                        label={_("Use password")}
-                       isChecked={!locked} onChange={checked => change("locked", !checked)}
+                       isChecked={!locked} onChange={(_, checked) => change("locked", !checked)}
                        description={
                            <Checkbox id="accounts-create-force-password-change"
-                                     className="pf-u-mb-xs"
+                                     className="pf-v5-u-mb-xs"
                                      label={_("Require password change on first login")}
-                                     isChecked={change_passw_force} onChange={checked => change("change_passw_force", checked)} />
+                                     isChecked={change_passw_force} onChange={(_event, checked) => change("change_passw_force", checked)} />
                        } />
 
                 <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
-                    <FlexItem spacer={{ default: 'spacerSm' }}>
+                    <FlexItem spacer={{ default: 'spacerNone' }}>
                         <Radio id="accounts-create-locked"
-                               isChecked={locked} onChange={checked => change("locked", checked)}
+                               isChecked={locked} onChange={(_, checked) => change("locked", checked)}
                                label={_("Disallow password authentication")} />
                     </FlexItem>
 
-                    <FlexItem spacer={{ default: 'spacerLg' }}>
+                    <FlexItem spacer={{ default: 'spacerNone' }}>
                         <Popover bodyContent={_("Other authentication methods are still available even when interactive password authentication is not allowed.")}
                                  showClose={false}>
                             <HelpIcon />
@@ -131,9 +137,9 @@ function AccountCreateBody({ state, errors, change, shells }) {
             </FormGroup>
 
             <PasswordFormFields password_label={_("Password")}
-                                password_confirm_label={_("Confirm")}
+                                password_confirm_label={_("Confirm password")}
                                 error_password={errors?.password}
-                                error_password_confirm={errors?.password_confirm}
+                                error_password_confirm={dynamic_password_confirm_error || errors?.password_confirm}
                                 idPrefix="accounts-create-password"
                                 change={change} />
         </Form>
@@ -190,6 +196,20 @@ function validate_home_dir(dir, directoryExpected) {
     return cockpit.spawn(["test", "!", directoryExpected ? "-d" : "-f", dir], { superuser: "require" });
 }
 
+function validate_password(password) {
+    if (!password)
+        return _("Empty password");
+
+    return null;
+}
+
+function validate_password_confirm(password_confirm, password) {
+    if (password_confirm !== password)
+        return _("The passwords do not match");
+
+    return null;
+}
+
 function suggest_username(realname) {
     function remove_diacritics(str) {
         const translate_table = {
@@ -215,7 +235,7 @@ function suggest_username(realname) {
 
         for (let k = 0; k < str.length;) {
             if (!is_valid_char_name(str[k]))
-                str = str.substr(0, k) + str.substr(k + 1);
+                str = str.substring(0, k) + str.substring(k + 1);
             else
                 k++;
         }
@@ -246,18 +266,18 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
         user_name: "",
         password: "",
         password_confirm: "",
+        password_confirm_dirty: false,
         locked: false,
         confirm_weak: false,
         change_passw_force: false,
         base_home_dir: null,
-        shell: null,
+        shell: "",
         uid,
         uid_exists: false,
         min_uid,
         max_uid,
-        home_dir: null,
+        home_dir: "",
         home_dir_dirty: false,
-        isShellSelectExpanded: false,
     };
     let errors = { };
 
@@ -266,9 +286,8 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
 
     function get_defaults() {
         return cockpit.spawn(["useradd", "-D"], { superuser: "require", err: "message" })
-                .catch(e => console.warn("Could not get useradd defaults: ", e.message))
                 .then(defaults => {
-                    let shell = null;
+                    let shell = "";
                     let base_home_dir = null;
                     defaults.split("\n").forEach(item => {
                         if (item.indexOf("SHELL=") === 0) {
@@ -280,6 +299,7 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
                     change("shell", shell);
                     change("base_home_dir", base_home_dir);
                 })
+                .catch(e => console.warn("Could not get useradd defaults: ", e.message))
                 .finally(() => change("dialogLoading", false));
     }
 
@@ -308,6 +328,10 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
         if (field == "change_passw_force")
             state.locked = false;
 
+        // Once password and confirm password are the same length, validate them after each keystroke
+        if (field == "password_confirm" && value.length >= state.password.length)
+            state.password_confirm_dirty = true;
+
         if (field == "locked")
             state.change_passw_force = false;
 
@@ -327,21 +351,24 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
         const errs = { };
 
         errs.real_name = validate_real_name(real_name);
-
-        if (password != password_confirm)
-            errs.password_confirm = _("The passwords do not match");
+        errs.password = validate_password(password);
+        errs.password_confirm = validate_password_confirm(password_confirm, password);
 
         if (password.length > 256)
             errs.password = _("Password is longer than 256 characters");
 
         errs.user_name = validate_username(user_name, accounts);
 
-        const promises = [
-            password_quality(password, force_weak)
-                    .catch(ex => {
-                        errs.password = (ex.message || ex.toString()).replaceAll("\n", " "); // not-covered: OS error
-                    })
-        ];
+        const promises = [];
+        // only evaluate password score if no other password error si present
+        if (!errs.password) {
+            promises.push(
+                password_quality(password, force_weak)
+                        .catch(ex => {
+                            errs.password = (ex.message || ex.toString()).replaceAll("\n", " "); // not-covered: OS error
+                        })
+            );
+        }
         if (!force_uid)
             errs.uid = validate_uid(uid, accounts, min_uid, max_uid, change);
 
@@ -422,6 +449,11 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
             else {
                 if (!errors.real_name && !errors.user_name && !errors.home_dir && !errors.uid && !errors.password_confirm && state.password.length <= 256)
                     state.confirm_weak = true;
+
+                // Once the form is submitted and passwords do not match, validate confirm password after each keystroke
+                if (errors.password_confirm)
+                    state.password_confirm_dirty = true;
+
                 update();
                 return Promise.reject();
             }
@@ -436,7 +468,7 @@ export function account_create_dialog(accounts, min_uid, max_uid, shells) {
         if (state.dialogLoading) {
             props.body = (
                 <Bullseye>
-                    <Spinner isSVG />
+                    <Spinner />
                 </Bullseye>
             );
         } else {

@@ -14,25 +14,26 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 import cockpit from "cockpit";
-import React, { useState } from "react";
+import React from "react";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
 import { DatePicker } from "@patternfly/react-core/dist/esm/components/DatePicker/index.js";
 import { Flex, FlexItem } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
 import { Form, FormGroup } from "@patternfly/react-core/dist/esm/components/Form/index.js";
 import { Popover } from "@patternfly/react-core/dist/esm/components/Popover/index.js";
-import { Select, SelectOption, SelectVariant } from "@patternfly/react-core/dist/esm/components/Select/index.js";
 import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
 import { TimePicker } from "@patternfly/react-core/dist/esm/components/TimePicker/index.js";
 import { TextInput } from "@patternfly/react-core/dist/esm/components/TextInput/index.js";
 import { CloseIcon, ExclamationCircleIcon, InfoCircleIcon, PlusIcon } from "@patternfly/react-icons";
 import { show_modal_dialog } from "cockpit-components-dialog.jsx";
+import { SimpleSelect } from "cockpit-components-simple-select";
+import { TypeaheadSelect } from "cockpit-components-typeahead-select";
 import { useObject, useEvent } from "hooks.js";
 
 import * as service from "service.js";
-import * as timeformat from "timeformat.js";
+import * as timeformat from "timeformat";
 import * as python from "python.js";
 import get_timesync_backend_py from "./get-timesync-backend.py";
 
@@ -97,11 +98,6 @@ export function ServerTime() {
         }
     });
 
-    self.format = function format(and_time) {
-        const options = { dateStyle: "medium", timeStyle: and_time ? "short" : undefined, timeZone: "UTC" };
-        return timeformat.formatter(options).format(self.utc_fake_now);
-    };
-
     const updateInterval = window.setInterval(emit_changed, 30000);
 
     self.wait = function wait() {
@@ -112,7 +108,7 @@ export function ServerTime() {
 
     self.update = function update() {
         return cockpit.spawn(["date", "+%s:%z"], { err: "message" })
-                .done(function(data) {
+                .then(data => {
                     const parts = data.trim().split(":");
                     const timems = parseInt(parts[0], 10) * 1000;
                     let tzmin = parseInt(parts[1].slice(-2), 10);
@@ -125,34 +121,17 @@ export function ServerTime() {
                     remote_offset = offsetms;
                     emit_changed();
                 })
-                .fail(function(ex) {
-                    console.log("Couldn't calculate server time offset: " + cockpit.message(ex));
-                });
+                .catch(ex => console.log("Couldn't calculate server time offset: " + cockpit.message(ex)));
     };
 
-    self.change_time = function change_time(datestr, timestr) {
-        return new Promise((resolve, reject) => {
-            /*
-             * There is no way to make sense of this date without a round trip to the
-             * server, as the timezone is really server specific.
-             */
-            cockpit.spawn(["date", "--date=" + datestr + " " + timestr, "+%s"])
-                    .fail(function(ex) {
-                        reject(ex);
-                    })
-                    .done(function(data) {
-                        const seconds = parseInt(data.trim(), 10);
-                        timedate.call('SetTime', [seconds * 1000 * 1000, false, true])
-                                .fail(function(ex) {
-                                    reject(ex);
-                                })
-                                .done(function() {
-                                    self.update();
-                                    resolve();
-                                });
-                    });
-        });
-    };
+    /* There is no way to make sense of this date without a round trip to the
+     * server, as the timezone is really server specific. */
+    self.change_time = (datestr, timestr) => cockpit.spawn(["date", "--date=" + datestr + " " + timestr, "+%s"])
+            .then(data => {
+                const seconds = parseInt(data.trim(), 10);
+                return timedate.call('SetTime', [seconds * 1000 * 1000, false, true])
+                        .then(self.update);
+            });
 
     self.bump_time = function (millis) {
         return timedate.call('SetTime', [millis, true, true]);
@@ -166,21 +145,19 @@ export function ServerTime() {
         return timedate.call('SetTimezone', [tz, true]);
     };
 
-    self.poll_ntp_synchronized = function poll_ntp_synchronized() {
-        client.call(timedate.path,
-                    "org.freedesktop.DBus.Properties", "Get", ["org.freedesktop.timedate1", "NTPSynchronized"])
-                .fail(function(error) {
-                    if (error.name != "org.freedesktop.DBus.Error.UnknownProperty" &&
+    self.poll_ntp_synchronized = () => client.call(
+        timedate.path, "org.freedesktop.DBus.Properties", "Get", ["org.freedesktop.timedate1", "NTPSynchronized"])
+            .then(result => {
+                const ifaces = { "org.freedesktop.timedate1": { NTPSynchronized: result[0].v } };
+                const data = { };
+                data[timedate.path] = ifaces;
+                client.notify(data);
+            })
+            .catch(error => {
+                if (error.name != "org.freedesktop.DBus.Error.UnknownProperty" &&
                         error.problem != "not-found")
-                        console.log("can't get NTPSynchronized property", error);
-                })
-                .done(function(result) {
-                    const ifaces = { "org.freedesktop.timedate1": { NTPSynchronized: result[0].v } };
-                    const data = { };
-                    data[timedate.path] = ifaces;
-                    client.notify(data);
-                });
-    };
+                    console.log("can't get NTPSynchronized property", error);
+            });
 
     let ntp_waiting_value = null;
     let ntp_waiting_resolve = null;
@@ -201,7 +178,7 @@ export function ServerTime() {
         ntp_waiting_value = val;
         client.call(timedate.path,
                     "org.freedesktop.DBus.Properties", "Get", ["org.freedesktop.timedate1", "NTP"])
-                .done(function(result) {
+                .then(result => {
                 // Check if don't want to enable enabled or disable disabled
                     if (result[0].v === val) {
                         ntp_waiting_resolve();
@@ -212,7 +189,7 @@ export function ServerTime() {
                             .catch(e => {
                                 ntp_waiting_resolve();
                                 ntp_waiting_resolve = null;
-                                console.error(e.message);
+                                console.error("Failed to call SetNTP:", e.message); // not-covered: OS error
                             });
                 });
         return promise;
@@ -319,14 +296,16 @@ export function ServerTime() {
                 });
     }
 
-    function set_custom_ntp_timesyncd(config) {
-        const custom_ntp_config_file = cockpit.file("/etc/systemd/timesyncd.conf.d/50-cockpit.conf",
-                                                    { superuser: true });
+    async function set_custom_ntp_timesyncd(config) {
+        const conf_path = "/etc/systemd/timesyncd.conf.d/50-cockpit.conf";
+        const custom_ntp_config_file = cockpit.file(conf_path, { superuser: "require" });
 
         const text = `# This file is automatically generated by Cockpit\n\n[Time]\n${config.enabled ? "" : "#"}NTP=${config.servers.join(" ")}\n`;
 
-        return cockpit.spawn(["mkdir", "-p", "/etc/systemd/timesyncd.conf.d"], { superuser: true })
-                .then(() => custom_ntp_config_file.replace(text));
+        // this must be readable with tight umask, timesyncd runs as unprivileged user
+        await cockpit.spawn(["mkdir", "-p", "-m755", "/etc/systemd/timesyncd.conf.d"], { superuser: "require" });
+        await custom_ntp_config_file.replace(text);
+        await cockpit.spawn(["chmod", "644", conf_path], { superuser: "require" });
     }
 
     const chronyd_sourcedir = "/etc/chrony/sources.d";
@@ -371,8 +350,8 @@ export function ServerTime() {
     }
 
     function set_custom_ntp_chronyd(config) {
-        const enabled_file = cockpit.file(chronyd_sources_enabled, { superuser: true });
-        const disabled_file = cockpit.file(chronyd_sources_disabled, { superuser: true });
+        const enabled_file = cockpit.file(chronyd_sources_enabled, { superuser: "require" });
+        const disabled_file = cockpit.file(chronyd_sources_disabled, { superuser: "require" });
 
         const text = "# This file is automatically generated by Cockpit\n\n" + config.servers.map(s => `server ${s}\n`).join("");
 
@@ -384,10 +363,10 @@ export function ServerTime() {
                     data += "\n# Added by Cockpit\n" + line + "\n";
                 return data;
             }
-            return cockpit.file("/etc/chrony.conf", { superuser: true }).modify(add_sourcedir);
+            return cockpit.file("/etc/chrony.conf", { superuser: "require" }).modify(add_sourcedir);
         }
 
-        return cockpit.spawn(["mkdir", "-p", chronyd_sourcedir], { superuser: true })
+        return cockpit.spawn(["mkdir", "-p", chronyd_sourcedir], { superuser: "require" })
                 .then(() => {
                     if (config.enabled)
                         return enabled_file.replace(text).then(() => disabled_file.replace(null)).then(ensure_sourcedir);
@@ -456,7 +435,7 @@ export function ServerTimeConfig() {
                 onClick={ () => change_systime_dialog(server_time, tz) }
                 data-timedated-initialized={ntp?.initialized}
                 isInline isDisabled={!superuser.allowed || !tz}>
-            { server_time.format(true) }
+            { timeformat.dateTimeUTC(server_time.utc_fake_now) }
         </Button>);
 
     let ntp_status = null;
@@ -469,7 +448,7 @@ export function ServerTimeConfig() {
                 body = <div>{cockpit.format(_("Synchronized with $0"), ntp.server)}</div>;
         } else {
             if (ntp.server) {
-                icon = <Spinner size="md" isSVG />;
+                icon = <Spinner size="md" />;
                 header = _("Synchronizing");
                 body = <div>{cockpit.format(_("Trying to synchronize with $0"), ntp.server)}</div>;
             } else {
@@ -528,9 +507,6 @@ function ValidatedInput({ errors, error_key, children }) {
 }
 
 function ChangeSystimeBody({ state, errors, change }) {
-    const [zonesOpen, setZonesOpen] = useState(false);
-    const [modeOpen, setModeOpen] = useState(false);
-
     const {
         time_zone, time_zones,
         mode,
@@ -567,7 +543,7 @@ function ChangeSystimeBody({ state, errors, change }) {
             <Flex className="ntp-server-input-group" spaceItems={{ default: 'spaceItemsSm' }} key={i}>
                 <FlexItem grow={{ default: 'grow' }}>
                     <TextInput value={s} placeholder={_("NTP server")} aria-label={_("NTP server")}
-                               onChange={(value, event) => change_server(event, i, value)} />
+                               onChange={(event, value) => change_server(event, i, value)} />
                 </FlexItem>
                 <Button variant="secondary" onClick={event => add_server(event, i)}
                         icon={ <PlusIcon /> } />
@@ -578,51 +554,48 @@ function ChangeSystimeBody({ state, errors, change }) {
     );
 
     const mode_options = [
-        <SelectOption key="manual_time" value="manual_time">{_("Manually")}</SelectOption>,
-        <SelectOption key="ntp_time" value="ntp_time" isDisabled={!ntp_supported}>{_("Automatically using NTP")}</SelectOption>
+        { value: "manual_time", content: _("Manually") },
+        { value: "ntp_time", content: _("Automatically using NTP"), isDisabled: !ntp_supported },
     ];
 
     if (custom_ntp.backend)
         mode_options.push(
-            <SelectOption key="ntp_time_custom" value="ntp_time_custom" isDisabled={!ntp_supported}>
-                { custom_ntp.backend == "chronyd"
+            {
+                value: "ntp_time_custom",
+                isDisabled: !ntp_supported,
+                content: (custom_ntp.backend == "chronyd")
                     ? _("Automatically using additional NTP servers")
                     : _("Automatically using specific NTP servers")
-                }
-            </SelectOption>);
+            });
 
     return (
         <Form isHorizontal>
             <FormGroup fieldId="systime-timezones" label={_("Time zone")}>
                 <Validated errors={errors} error_key="time_zone">
-                    <Select id="systime-timezones" variant={SelectVariant.typeahead}
-                            isOpen={zonesOpen} onToggle={setZonesOpen}
-                            selections={time_zone}
-                            onSelect={(event, value) => { setZonesOpen(false); change("time_zone", value) }}
-                            menuAppendTo="parent">
-                        { time_zones.map(tz => <SelectOption key={tz} value={tz}>{tz.replaceAll("_", " ")}</SelectOption>) }
-                    </Select>
+                    <TypeaheadSelect toggleProps={ { id: "systime-timezones" } }
+                                     isScrollable
+                                     selected={time_zone}
+                                     onSelect={(event, value) => { change("time_zone", value) }}
+                                     selectOptions={time_zones.map(tz => (
+                                         { value: tz, content: tz.replaceAll("_", " ") }
+                                     ))} />
                 </Validated>
             </FormGroup>
             <FormGroup fieldId="change_systime" label={_("Set time")} isStack>
-                <Select id="change_systime"
-                        isOpen={modeOpen} onToggle={setModeOpen}
-                        selections={mode} onSelect={(event, value) => { setModeOpen(false); change("mode", value) }}
-                        menuAppendTo="parent">
-                    { mode_options }
-                </Select>
+                <SimpleSelect
+                    id="change_systime"
+                    options={mode_options}
+                    selected={mode}
+                    onSelect={value => change("mode", value)} />
                 { mode == "manual_time" &&
-                    <div id="systime-manual-row">
+                    <Flex spaceItems={{ default: 'spaceItemsSm' }} id="systime-manual-row">
                         <ValidatedInput errors={errors} error_key="manual_date">
                             <DatePicker id="systime-date-input"
                                         aria-label={_("Pick date")}
                                         buttonAriaLabel={_("Toggle date picker")}
-                                        dateFormat={timeformat.dateShort}
-                                        dateParse={timeformat.parseShortDate}
                                         invalidFormatText=""
                                         locale={timeformat.dateFormatLang()}
                                         weekStart={timeformat.firstDayOfWeek()}
-                                        placeholder={timeformat.dateShortFormat()}
                                         onChange={(_, d) => change("manual_date", d)}
                                         value={manual_date}
                                         appendTo={() => document.body} />
@@ -638,7 +611,7 @@ function ChangeSystimeBody({ state, errors, change }) {
                         </ValidatedInput>
                         <Validated errors={errors} error_key="manual_date" />
                         <Validated errors={errors} error_key="manual_time" />
-                    </div>
+                    </Flex>
                 }
                 { mode == "ntp_time_custom" &&
                     <Validated errors={errors} error_key="ntp_servers">
@@ -673,7 +646,7 @@ function change_systime_dialog(server_time, timezone) {
     let errors = { };
 
     function get_current_time() {
-        state.manual_date = server_time.format();
+        state.manual_date = server_time.utc_fake_now.toISOString().split("T")[0];
 
         const minutes = server_time.utc_fake_now.getUTCMinutes();
         // normalize to two digits

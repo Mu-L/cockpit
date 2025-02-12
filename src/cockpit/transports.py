@@ -19,6 +19,7 @@
 
 import asyncio
 import collections
+import ctypes
 import errno
 import fcntl
 import logging
@@ -28,8 +29,19 @@ import signal
 import struct
 import subprocess
 import termios
+from typing import Any, ClassVar, Sequence
 
-from typing import Any, ClassVar, Deque, Dict, List, Optional, Sequence, Tuple
+from .jsonutil import JsonObject, get_int
+
+sys_prctl = ctypes.CDLL(None).prctl
+
+
+def prctl(*args: int) -> None:
+    if sys_prctl(*args) != 0:
+        raise OSError('prctl() failed')
+
+
+SET_PDEATHSIG = 1
 
 
 logger = logging.getLogger(__name__)
@@ -43,7 +55,7 @@ class _Transport(asyncio.Transport):
     _loop: asyncio.AbstractEventLoop
     _protocol: asyncio.Protocol
 
-    _queue: Optional[Deque[bytes]]
+    _queue: 'collections.deque[bytes] | None'
     _in_fd: int
     _out_fd: int
     _closing: bool
@@ -55,7 +67,7 @@ class _Transport(asyncio.Transport):
                  loop: asyncio.AbstractEventLoop,
                  protocol: asyncio.Protocol,
                  in_fd: int = -1, out_fd: int = -1,
-                 extra: Optional[Dict[str, object]] = None):
+                 extra: 'dict[str, object] | None' = None):
         super().__init__(extra)
 
         self._loop = loop
@@ -126,11 +138,11 @@ class _Transport(asyncio.Transport):
     def _close(self) -> None:
         pass
 
-    def abort(self, exc: Optional[Exception] = None) -> None:
+    def abort(self, exc: 'Exception | None' = None) -> None:
         self._closing = True
         self._close_reader()
         self._remove_write_queue()
-        self._protocol.connection_lost(exc)
+        self._loop.call_soon(self._protocol.connection_lost, exc)
         self._close()
 
     def can_write_eof(self) -> bool:
@@ -140,17 +152,20 @@ class _Transport(asyncio.Transport):
         assert not self._eof
         self._eof = True
         if self._queue is None:
+            logger.debug('%s got EOF.  closing backend.', self)
             self._write_eof_now()
+        else:
+            logger.debug('%s got EOF.  bytes in queue, deferring close', self)
 
     def get_write_buffer_size(self) -> int:
         if self._queue is None:
             return 0
         return sum(len(block) for block in self._queue)
 
-    def get_write_buffer_limits(self) -> Tuple[int, int]:
+    def get_write_buffer_limits(self) -> 'tuple[int, int]':
         return (0, 0)
 
-    def set_write_buffer_limits(self, high: Optional[int] = None, low: Optional[int] = None) -> None:
+    def set_write_buffer_limits(self, high: 'int | None' = None, low: 'int | None' = None) -> None:
         assert high is None or high == 0
         assert low is None or low == 0
 
@@ -158,6 +173,7 @@ class _Transport(asyncio.Transport):
         raise NotImplementedError
 
     def _write_ready(self) -> None:
+        logger.debug('%s _write_ready', self)
         assert self._queue is not None
 
         try:
@@ -168,16 +184,23 @@ class _Transport(asyncio.Transport):
             self.abort(exc)
             return
 
+        logger.debug('  successfully wrote %d bytes from the queue', n_bytes)
+
         while n_bytes:
             block = self._queue.popleft()
             if len(block) > n_bytes:
                 # This block wasn't completely written.
+                logger.debug('  incomplete block.  Stop.')
                 self._queue.appendleft(block[n_bytes:])
                 break
             n_bytes -= len(block)
-        else:
+            logger.debug('  removed complete block.  %d remains.', n_bytes)
+
+        if not self._queue:
+            logger.debug('%s queue drained.')
             self._remove_write_queue()
             if self._eof:
+                logger.debug('%s queue drained.  closing backend now.')
                 self._write_eof_now()
             if self._closing:
                 self.abort()
@@ -189,13 +212,20 @@ class _Transport(asyncio.Transport):
             self._queue = None
 
     def _create_write_queue(self, data: bytes) -> None:
+        logger.debug('%s creating write queue for fd %s', self, self._out_fd)
         assert self._queue is None
         self._loop.add_writer(self._out_fd, self._write_ready)
         self._queue = collections.deque((data,))
         self._protocol.pause_writing()
 
     def write(self, data: bytes) -> None:
-        assert not self._closing
+        # this is a race condition with subprocesses: if we get and process the the "exited"
+        # event before seeing BrokenPipeError, we'll try to write to a closed pipe.
+        # Do what the standard library does and ignore, instead of assert
+        if self._closing:
+            logger.debug('ignoring write() to closing transport fd %i', self._out_fd)
+            return
+
         assert not self._eof
 
         if self._queue is not None:
@@ -253,6 +283,12 @@ class SubprocessProtocol(asyncio.Protocol):
         raise NotImplementedError
 
 
+class WindowSize:
+    def __init__(self, value: JsonObject):
+        self.rows = get_int(value, 'rows')
+        self.cols = get_int(value, 'cols')
+
+
 class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
     """A bi-directional transport speaking with stdin/out of a subprocess.
 
@@ -269,11 +305,11 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
     data from it, making it available via the .get_stderr() method.
     """
 
-    _returncode: Optional[int] = None
+    _returncode: 'int | None' = None
 
-    _pty_fd: Optional[int] = None
-    _process: Optional['subprocess.Popen[bytes]'] = None
-    _stderr: Optional['Spooler']
+    _pty_fd: 'int | None' = None
+    _process: 'subprocess.Popen[bytes] | None' = None
+    _stderr: 'Spooler | None'
 
     @staticmethod
     def _create_watcher() -> asyncio.AbstractChildWatcher:
@@ -297,11 +333,11 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
 
         return watcher
 
-    def get_stderr(self, reset: bool = False) -> Optional[str]:
+    def get_stderr(self, *, reset: bool = False) -> str:
         if self._stderr is not None:
-            return self._stderr.get(reset).decode(errors='replace')
+            return self._stderr.get(reset=reset).decode(errors='replace')
         else:
-            return None
+            return ''
 
     def _exited(self, pid: int, code: int) -> None:
         # NB: per AbstractChildWatcher API, this handler should be thread-safe,
@@ -314,7 +350,8 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
         # zero.  For that reason, we need to store our own copy of the return
         # status.  See https://github.com/python/cpython/issues/59960
         assert isinstance(self._protocol, SubprocessProtocol)
-        assert self._process is not None and self._process.pid == pid
+        assert self._process is not None
+        assert self._process.pid == pid
         self._returncode = code
         logger.debug('Process exited with status %d', self._returncode)
         if not self._closing:
@@ -324,27 +361,37 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
                  loop: asyncio.AbstractEventLoop,
                  protocol: SubprocessProtocol,
                  args: Sequence[str],
+                 *,
                  pty: bool = False,
-                 window: Optional[Dict[str, int]] = None,
+                 window: 'WindowSize | None' = None,
                  **kwargs: Any):
+
+        # go down as a team -- we don't want any leaked processes when the bridge terminates
+        def preexec_fn() -> None:
+            prctl(SET_PDEATHSIG, signal.SIGTERM)
+            if pty:
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
         if pty:
             self._pty_fd, session_fd = os.openpty()
 
             if window is not None:
-                self.set_window_size(**window)
+                self.set_window_size(window)
 
             kwargs['stderr'] = session_fd
             self._process = subprocess.Popen(args,
                                              stdin=session_fd, stdout=session_fd,
-                                             start_new_session=True, **kwargs)
+                                             preexec_fn=preexec_fn, start_new_session=True, **kwargs)
             os.close(session_fd)
 
             in_fd, out_fd = self._pty_fd, self._pty_fd
             self._eio_is_eof = True
 
         else:
-            self._process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, **kwargs)
-            assert self._process.stdin and self._process.stdout
+            self._process = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                             preexec_fn=preexec_fn, **kwargs)
+            assert self._process.stdin
+            assert self._process.stdout
             in_fd = self._process.stdout.fileno()
             out_fd = self._process.stdin.fileno()
 
@@ -357,9 +404,9 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
 
         self._get_watcher(loop).add_child_handler(self._process.pid, self._exited)
 
-    def set_window_size(self, rows: int, cols: int) -> None:
+    def set_window_size(self, size: WindowSize) -> None:
         assert self._pty_fd is not None
-        fcntl.ioctl(self._pty_fd, termios.TIOCSWINSZ, struct.pack('2H4x', rows, cols))
+        fcntl.ioctl(self._pty_fd, termios.TIOCSWINSZ, struct.pack('2H4x', size.rows, size.cols))
 
     def can_write_eof(self) -> bool:
         assert self._process is not None
@@ -375,13 +422,13 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
         assert self._process is not None
         return self._process.pid
 
-    def get_returncode(self) -> Optional[int]:
+    def get_returncode(self) -> 'int | None':
         return self._returncode
 
     def get_pipe_transport(self, fd: int) -> asyncio.Transport:
         raise NotImplementedError
 
-    def send_signal(self, sig: signal.Signals) -> None:  # type: ignore # https://github.com/python/mypy/issues/13885
+    def send_signal(self, sig: signal.Signals) -> None:  # type: ignore[override] # mypy/issues/13885
         assert self._process is not None
         # We try to avoid using subprocess.send_signal().  It contains a call
         # to waitpid() internally to avoid signalling the wrong process (if a
@@ -412,14 +459,18 @@ class SubprocessTransport(_Transport, asyncio.SubprocessTransport):
         self.send_signal(signal.SIGKILL)
 
     def _close(self) -> None:
+        if self._pty_fd is not None:
+            os.close(self._pty_fd)
+            self._pty_fd = None
+
         if self._process is not None:
+            if self._process.stdin is not None:
+                self._process.stdin.close()
+                self._process.stdin = None
             try:
                 self.terminate()  # best effort...
             except PermissionError:
                 logger.debug("can't kill %i due to EPERM", self._process.pid)
-        if self._pty_fd is not None:
-            os.close(self._pty_fd)
-            self._pty_fd = None
 
 
 class StdioTransport(_Transport):
@@ -451,7 +502,7 @@ class Spooler:
 
     _loop: asyncio.AbstractEventLoop
     _fd: int
-    _contents: List[bytes]
+    _contents: 'list[bytes]'
 
     def __init__(self, loop: asyncio.AbstractEventLoop, fd: int):
         self._loop = loop
@@ -482,7 +533,7 @@ class Spooler:
             return False
         return select.select([self._fd], [], [], 0) != ([], [], [])
 
-    def get(self, reset: bool = False) -> bytes:
+    def get(self, *, reset: bool = False) -> bytes:
         while self._is_ready():
             self._read_ready()
 
@@ -490,9 +541,6 @@ class Spooler:
         if reset:
             self._contents = []
         return result
-
-    def is_closed(self) -> bool:
-        return self._fd == -1
 
     def close(self) -> None:
         if self._fd != -1:

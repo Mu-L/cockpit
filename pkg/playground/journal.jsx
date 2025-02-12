@@ -14,13 +14,13 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React from "react";
 import { createRoot } from 'react-dom/client';
 
-import '../lib/patternfly/patternfly-4-cockpit.scss';
+import '../lib/patternfly/patternfly-5-cockpit.scss';
 import "page.scss";
 
 import { LogsPanel } from "cockpit-components-logs-panel.jsx";

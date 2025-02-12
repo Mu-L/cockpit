@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,16 +15,30 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
-import parent  # noqa: F401
-from storagelib import StorageCase
-from testlib import test_main
+import storagelib
+import testlib
 
 
-class TestStorageMounting(StorageCase):
+@testlib.nondestructive
+class TestStorageMounting(storagelib.StorageCase):
+
+    def _navigate_root_subvolume(self):
+        b = self.browser
+
+        b.wait_visible(self.card("btrfs filesystem"))
+        self.click_card_row("btrfs filesystem", name="top-level")
+        b.wait_visible(self.card("btrfs subvolume"))
 
     def testMounting(self):
+        self._testMounting()
+
+    @testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*')
+    def testMountingBtrfs(self):
+        self._testMounting("btrfs", "btrfs subvolume")
+
+    def _testMounting(self, fstype="ext4", filesystem="ext4 filesystem"):
         m = self.machine
         b = self.browser
 
@@ -34,16 +48,15 @@ class TestStorageMounting(StorageCase):
         self.login_and_go("/storage")
 
         # Add a disk
-        m.add_disk("50M", serial="MYDISK")
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('#drives .sidepanel-row:contains("MYDISK")')
-        b.wait_visible('#storage-detail')
+        disk_size = 128
+        disk = self.add_ram_disk(size=disk_size)
+        self.click_card_row("Storage", name=disk)
 
         # Format it
 
-        self.content_row_action(1, "Format")
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog_wait_open()
-        self.dialog_set_val("type", "ext4")
+        self.dialog_set_val("type", fstype)
         self.dialog_set_val("name", "FILESYSTEM")
         self.dialog_set_val("mount_point", "")
         self.dialog_apply()
@@ -52,10 +65,12 @@ class TestStorageMounting(StorageCase):
         self.dialog_apply()
         self.dialog_wait_close()
         self.assert_in_configuration("/dev/sda", "fstab", "dir", mount_point_foo)
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-        self.content_tab_wait_in_info(1, 1, "Name", "FILESYSTEM")
+        if fstype == "btrfs":
+            self._navigate_root_subvolume()
+        else:
+            b.wait_text(self.card_desc(filesystem, "Name"), "FILESYSTEM")
 
-        self.content_tab_wait_in_info(1, 1, "Mount point", mount_point_foo)
+        b.wait_in_text(self.card_desc(filesystem, "Mount point"), mount_point_foo)
 
         # Keep the mount point busy
         sleep_pid = m.spawn(f"cd {mount_point_foo}; sleep infinity", "sleep")
@@ -70,40 +85,54 @@ ExecStart=/usr/bin/sleep infinity
 """)
         m.execute("systemctl start keep-mnt-busy")
 
-        self.content_dropdown_action(1, "Unmount")
+        b.click(self.card_button(filesystem, "Unmount"))
         b.wait_in_text("#dialog", str(sleep_pid))
         b.wait_in_text("#dialog", "sleep infinity")
         b.wait_in_text("#dialog", "keep-mnt-busy")
         b.wait_in_text("#dialog", "Test Service")
         b.wait_in_text("#dialog", "/usr/bin/sleep infinity")
         b.wait_in_text("#dialog", "The listed processes and services will be forcefully stopped.")
+        if fstype != "btrfs":
+            b.assert_pixels("#dialog", "busy-unmount", mock={"td[data-label='PID']": "1234",
+                                                             "td[data-label='Started']": "a little while ago"})
         self.confirm()
-        self.content_tab_wait_in_info(1, 1, "Mount point", "The filesystem is not mounted")
+        b.wait_in_text(self.card_desc(filesystem, "Mount point"), "The filesystem is not mounted")
 
         m.execute("! systemctl --quiet is-active keep-mnt-busy")
 
-        self.content_tab_info_action(1, 1, "Name")
-        self.dialog({"name": "filesystem"})
-        self.content_tab_wait_in_info(1, 1, "Name", "filesystem")
+        if fstype != "btrfs":  # tested in test-storage-btrfs
+            b.click(self.card_desc_action(filesystem, "Name"))
+            self.dialog({"name": "filesystem"})
+            b.wait_text(self.card_desc(filesystem, "Name"), "filesystem")
 
-        self.content_tab_info_action(1, 1, "Mount point")
+        b.click(self.card_desc(filesystem, "Mount point") + " button")
         self.dialog(expect={"mount_point": mount_point_foo},
                     values={"mount_point": mount_point_bar})
         self.assert_in_configuration("/dev/sda", "fstab", "dir", mount_point_bar)
-        self.content_tab_wait_in_info(1, 1, "Mount point", mount_point_bar)
+        b.wait_in_text(self.card_desc(filesystem, "Mount point"), mount_point_bar)
 
-        self.content_row_action(1, "Mount")
-        self.confirm()
-        self.wait_mounted(1, 1)
+        b.click(self.card_button(filesystem, "Mount"))
+        self.dialog_wait_open()
+        self.dialog_wait_val("mount_point", mount_point_bar)
+        self.dialog_set_val("mount_point", "")
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", "Mount point cannot be empty")
+        self.dialog_set_val("mount_point", mount_point_bar)
+        self.dialog_apply()
+        self.dialog_wait_close()
+        b.wait_not_in_text(self.card_desc(filesystem, "Mount point"), "The filesystem is not mounted")
 
         # Set the "Never unlock at boot option"
-        self.content_tab_info_action(1, 1, "Mount point")
+        b.click(self.card_desc(filesystem, "Mount point") + " button")
         self.dialog({"at_boot": "never"})
         self.assertIn("noauto", m.execute(f"findmnt -s -n -o OPTIONS {mount_point_bar}"))
         self.assertIn("x-cockpit-never-auto", m.execute(f"findmnt -s -n -o OPTIONS {mount_point_bar}"))
 
         # Go to overview page and check that the filesystem usage is
         # displayed correctly.
+
+        if fstype == "btrfs":  # TODO: Cockpit/UDisks reports the wrong usage for btrfs subvolumes
+            return
 
         def wait_ratio_in_range(sel, low, high):
             b.wait_js_func("""(function (sel, low, high) {
@@ -116,93 +145,270 @@ ExecStart=/usr/bin/sleep infinity
             })""", sel, low, high)
 
         b.go("#/")
-        b.wait_in_text("table[aria-label=Filesystems]", mount_point_bar)
-        bar_selector = f'table[aria-label=Filesystems] tr:contains("{mount_point_bar}") td:nth-child(4)'
+        b.wait_visible(self.card_row("Storage", location=mount_point_bar))
+        bar_selector = self.card_row("Storage", location=mount_point_bar) + " td:nth-child(5)"
         wait_ratio_in_range(bar_selector, 0.0, 0.1)
-        m.execute(f"dd if=/dev/zero of={mount_point_bar}/zero bs=1M count=30 status=none")
+        dd_count = disk_size // 2 + 10
+        m.execute(f"dd if=/dev/zero of={mount_point_bar}/zero bs=1M count={dd_count} status=none")
         wait_ratio_in_range(bar_selector, 0.5, 1.0)
         m.execute(f"rm {mount_point_bar}/zero")
         wait_ratio_in_range(bar_selector, 0.0, 0.1)
-        b.click('table[aria-label=Filesystems] tr:contains("%s")' % mount_point_bar)
-        b.wait_visible("#storage-detail")
 
-        def wait_info_field_value(name, value):
-            return b.wait_text(f'#detail-header dt:contains("{name}") + dd', value)
+        self.click_card_row("Storage", location=mount_point_bar)
+        b.wait_in_text(self.card_desc("Solid State Drive", "Serial number"), "8000")  # scsi_debug serial
 
-        wait_info_field_value("Serial number", "MYDISK")
+        # Remove fstab entry
+
+        b.click(self.card_desc(filesystem, "Mount point") + " button")
+        self.dialog(expect={"mount_point": mount_point_bar},
+                    values={"mount_point": ""})
+        self.assertEqual(self.configuration_field("/dev/sda", "fstab", "dir"), "")
+        b.wait_in_text(self.card_desc(filesystem, "Mount point"), "The filesystem has no permanent mount point.")
+
+    @testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*')
+    def testMountingHelpBtrfs(self):
+        self._testMountingHelp("btrfs", "btrfs subvolume")
 
     def testMountingHelp(self):
+        self._testMountingHelp()
+
+    def _testMountingHelp(self, fstype="ext4", filesystem="ext4 filesystem"):
         m = self.machine
         b = self.browser
 
         self.login_and_go("/storage")
 
         # Add a disk
-        m.add_disk("50M", serial="MYDISK")
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('#drives .sidepanel-row:contains("MYDISK")')
-        b.wait_visible('#storage-detail')
+        disk = self.add_ram_disk(size=128)
+        self.click_card_row("Storage", name=disk)
 
         # Format it
 
-        self.content_row_action(1, "Format")
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog_wait_open()
-        self.dialog_set_val("type", "ext4")
+        self.dialog_set_val("type", fstype)
         self.dialog_set_val("name", "FILESYSTEM")
         self.dialog_set_val("mount_point", "/run/foo")
         self.dialog_apply()
         self.dialog_wait_close()
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-        self.content_tab_wait_in_info(1, 1, "Name", "FILESYSTEM")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "/run/foo")
-
-        fsys_tab = self.content_tab_expand(1, 1)
+        if fstype == "btrfs":
+            self._navigate_root_subvolume()
+            b.wait_in_text(self.card_desc("btrfs subvolume", "Mount point"), "/run/foo")
+            self.addCleanupMount("/run/foo")
+        else:
+            b.wait_text(self.card_desc(filesystem, "Name"), "FILESYSTEM")
+            b.wait_in_text(self.card_desc(filesystem, "Mount point"), "/run/foo")
 
         # Unmount externally, remount with Cockpit
 
-        m.execute("umount /run/foo")
-        b.click(fsys_tab + " button:contains(Mount now)")
-        b.wait_not_present(fsys_tab + " button:contains(Mount now)")
-        self.wait_mounted(1, 1)
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        b.click(self.card_button(filesystem, "Mount now"))
+        b.wait_not_present(self.card_button(filesystem, "Mount now"))
+        b.wait_not_in_text(self.card_desc(filesystem, "Mount point"), "The filesystem is not mounted")
 
         # Unmount externally, adjust fstab with Cockpit
 
-        m.execute("umount /run/foo")
-        b.click(fsys_tab + " button:contains(Do not mount automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Do not mount automatically on boot)")
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        b.click(self.card_button(filesystem, "Do not mount automatically on boot"))
+        b.wait_not_present(self.card_button(filesystem, "Do not mount automatically on boot"))
+
+        # Mount somewhere else externally while "noauto", unmount with Cockpit
+
+        m.execute(f"mkdir -p /run/bar; mount {disk} /run/bar")
+        b.click(self.card_button(filesystem, "Unmount now"))
+        b.wait_not_present(self.card_button(filesystem, "Unmount now"))
 
         # Mount externally, unmount with Cockpit
 
         m.execute("mount /run/foo")
-        b.click(fsys_tab + " button:contains(Unmount now)")
-        b.wait_not_present(fsys_tab + " button:contains(Unmount now)")
+        b.click(self.card_button(filesystem, "Unmount now"))
+        b.wait_not_present(self.card_button(filesystem, "Unmount now"))
 
         # Mount externally, adjust fstab with Cockpit
 
         m.execute("mount /run/foo")
-        b.click(fsys_tab + " button:contains(Mount also automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Mount also automatically on boot)")
+        b.click(self.card_button(filesystem, "Mount also automatically on boot"))
+        b.wait_not_present(self.card_button(filesystem, "Mount also automatically on boot"))
 
         # Move mount point externally, move back with Cockpit
 
-        m.execute("umount /run/foo")
-        m.execute("mkdir -p /run/bar; mount /dev/sda /run/bar")
-        b.click(fsys_tab + " button:contains(Mount on /run/foo now)")
-        b.wait_not_present(fsys_tab + " button:contains(Mount on /run/foo now)")
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        m.execute(f"mkdir -p /run/bar; mount {disk} /run/bar")
+        b.click(self.card_button(filesystem, "Mount on /run/foo now"))
+        b.wait_not_present(self.card_button(filesystem, "Mount on /run/foo now"))
 
         # Move mount point externally, adjust fstab with Cockpit
 
-        m.execute("umount /run/foo")
-        m.execute("mkdir -p /run/bar; mount /dev/sda /run/bar")
-        b.click(fsys_tab + " button:contains(Mount automatically on /run/bar on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Mount automatically on /run/bar on boot)")
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        m.execute(f"mkdir -p /run/bar; mount {disk} /run/bar")
+        b.click(self.card_button(filesystem, "Mount automatically on /run/bar on boot"))
+        b.wait_not_present(self.card_button(filesystem, "Mount automatically on /run/bar on boot"))
 
         # Using noauto,x-systemd.automount should not show a warning
         m.execute("sed -i -e 's/auto nofail/auto nofail,noauto/' /etc/fstab")
-        b.wait_visible(fsys_tab + " button:contains(Mount also automatically on boot)")
+        b.wait_visible(self.card_button(filesystem, "Mount also automatically on boot"))
         m.execute("sed -i -e 's/noauto/noauto,x-systemd.automount/' /etc/fstab")
-        b.wait_not_present(fsys_tab + " button:contains(Mount also automatically on boot)")
+        b.wait_not_present(self.card_button(filesystem, "Mount also automatically on boot"))
 
+        # Without fstab entry, mount and try to unmount
+        m.execute("sed -i '/run\\/bar/d' /etc/fstab")
+        b.wait_visible(self.card_button(filesystem, "Mount automatically on /run/bar on boot"))
+        b.click(self.card_button(filesystem, "Unmount now"))
+        b.wait_not_present(self.card_button(filesystem, "Mount automatically on /run/bar on boot"))
+
+    def testFstabOptions(self):
+        self._testFstabOptions()
+
+    @testlib.skipImage('no btrfs support', 'rhel-*', 'centos-*')
+    def testFsabOptionsBtrfs(self):
+        self._testFstabOptions("btrfs", "btrfs subvolume")
+
+    def _testFstabOptions(self, filesystem="ext4", desc="ext4 filesystem"):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk(size=128)
+        self.click_card_row("Storage", name=disk)
+
+        m.execute(f"mkfs.{filesystem} -L testfs {disk}")
+        if filesystem == "btrfs":
+            self._navigate_root_subvolume()
+        else:
+            b.wait_visible(self.card(desc))
+
+        m.execute("! grep /run/data /etc/fstab")
+        b.click(self.card_button(desc, "Mount"))
+        self.dialog({"mount_point": "/run/data",
+                     "mount_options.extra": "x-foo"})
+        m.execute("grep /run/data /etc/fstab")
+        m.execute("grep 'x-foo' /etc/fstab")
+
+        b.wait_in_text(self.card_desc(desc, "Mount point"), "/run/data (ignore failure, x-foo)")
+
+        # absent mntopts and fsck columns implies "defaults"
+        if filesystem == "btrfs":
+            m.execute(r"sed -i '/run\/data/ s/auto.*$/auto subvol=\//' /etc/fstab")
+        else:
+            m.execute(r"sed -i '/run\/data/ s/auto.*$/auto/' /etc/fstab")
+        b.wait_in_text(self.card_desc(desc, "Mount point"), "/run/data (stop boot on failure)")
+
+    @testlib.skipImage("FIXME: ought to work, investigate", "rhel-8-10")
+    def testBadOption(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk()
+        self.click_card_row("Storage", name=disk)
+
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "ext4",
+                     "mount_point": "/run/foo"},
+                    secondary=True)
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "The filesystem is not mounted")
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
+
+        b.click(self.card_button("ext4 filesystem", "Mount"))
+        self.dialog_wait_open()
+        self.dialog_set_val("mount_options.extra", "hurr")
+        self.dialog_apply()
+        self.dialog_wait_alert("Unknown parameter 'hurr'", "bad option")
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        # No changes should have been done to fstab, and the
+        # filesystem should not be mounted.
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
+        self.assertNotIn("hurr", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "The filesystem is not mounted")
+
+        # Mount
+        b.click(self.card_button("ext4 filesystem", "Mount"))
+        self.dialog({})
+
+        # Apply the dialog without changes and verify that the
+        # filesystem is still mounted afterwards.  Cockpit used to
+        # have a bug where this would accidentally unmount the
+        # filesystem.
+
+        b.click(self.card_desc("ext4 filesystem", "Mount point") + " button")
+        self.dialog({})
+        b.wait_not_in_text(self.card_desc("ext4 filesystem", "Mount point"), "The filesystem is not mounted")
+
+        # Try to set a bad option while the filesystem is mounted.
+        b.click(self.card_desc("ext4 filesystem", "Mount point") + " button")
+        self.dialog_wait_open()
+        self.dialog_set_val("mount_options.extra", "hurr")
+        self.dialog_apply()
+        self.dialog_wait_alert("Unknown parameter 'hurr'", "bad option")
+        self.dialog_cancel()
+        self.dialog_wait_close()
+
+        self.assertNotIn("hurr", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
+        b.wait_not_in_text(self.card_desc("ext4 filesystem", "Mount point"), "The filesystem is not mounted")
+
+    def testAtBoot(self):
+        m = self.machine
+        b = self.browser
+
+        self.login_and_go("/storage")
+
+        disk = self.add_ram_disk()
+        self.click_card_row("Storage", name=disk)
+
+        self.click_card_dropdown("Unformatted data", "Format")
+        self.dialog({"type": "ext4",
+                     "mount_point": "/foo",
+                     "at_boot": "local",
+                     "crypto": "luks1",
+                     "passphrase": "foobarfoo",
+                     "passphrase2": "foobarfoo"},
+                    secondary=True)
+        b.wait_in_text(self.card_desc("Filesystem", "Mount point"), "The filesystem is not mounted")
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "noauto")
+
+        def mount(expected_at_boot, at_boot):
+            b.click(self.card_button("Filesystem", "Mount"))
+            self.dialog_wait_open()
+            self.dialog_wait_val("at_boot", expected_at_boot)
+            self.dialog_set_val("at_boot", at_boot)
+            self.dialog_set_val("passphrase", "foobarfoo")
+            self.dialog_apply()
+            self.dialog_wait_close()
+
+        def unmount():
+            b.click(self.card_button("ext4 filesystem", "Unmount"))
+            self.dialog_wait_open()
+            self.dialog_apply()
+            self.dialog_wait_close()
+            b.wait_in_text(self.card_desc("Filesystem", "Mount point"), "The filesystem is not mounted")
+
+        mount("local", "nofail")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "ignore failure")
+        self.assertIn("nofail", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "nofail")
+        unmount()
+
+        mount("nofail", "netdev")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "after network")
+        self.assertIn("_netdev", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "_netdev")
+        unmount()
+
+        mount("netdev", "never")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "never mount")
+        self.assertIn("x-cockpit-never-auto", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
+        self.assert_in_configuration(disk, "crypttab", "options", "noauto")
+        unmount()
+
+
+@testlib.nondestructive
+@testlib.skipImage("cryptsetup uses too much memory, OOM on our test VMs", "rhel-8-*")
+class TestStorageMountingLUKS(storagelib.StorageCase):
     def testEncryptedMountingHelp(self):
         m = self.machine
         b = self.browser
@@ -210,16 +416,12 @@ ExecStart=/usr/bin/sleep infinity
         self.login_and_go("/storage")
 
         # Add a disk
-        m.add_disk("50M", serial="MYDISK")
-        dev = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_MYDISK"
-
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('#drives .sidepanel-row:contains("MYDISK")')
-        b.wait_visible('#storage-detail')
+        disk = self.add_ram_disk()
+        self.click_card_row("Storage", name=disk)
 
         # Format it with encryption
 
-        self.content_row_action(1, "Format")
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog_wait_open()
         self.dialog_set_val("type", "ext4")
         self.dialog_set_val("name", "FILESYSTEM")
@@ -231,57 +433,59 @@ ExecStart=/usr/bin/sleep infinity
         self.dialog_set_val("at_boot", "netdev")
         self.dialog_apply()
         self.dialog_wait_close()
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem (encrypted)")
-        self.content_tab_wait_in_info(1, 1, "Name", "FILESYSTEM")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "/run/foo")
+        b.wait_text(self.card_desc("ext4 filesystem", "Name"), "FILESYSTEM")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "/run/foo")
 
         # Unmount and lock externally, unlock and remount with Cockpit
 
-        m.execute("umount /run/foo")
-        m.execute(f"udisksctl lock -b {dev}")
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        m.execute(f"udisksctl lock -b {disk}")
         # wait until the UI updated to the locking
-        self.content_tab_wait_in_info(1, 2, "Cleartext device", "-")
-        fsys_tab = self.content_tab_expand(1, 1)
-        b.click(fsys_tab + " button:contains(Mount now)")
+        b.wait_text(self.card_desc("Encryption", "Cleartext device"), "-")
+        b.click(self.card_button("Filesystem", "Mount now"))
         self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
-        b.wait_not_present(fsys_tab + " button:contains(Mount now)")
-        self.wait_mounted(1, 1)
+        b.wait_not_in_text(self.card_desc("ext4 filesystem", "Mount point"),
+                           "The filesystem is not mounted")
+        b.wait_not_present(self.card_button("ext4 filesystem", "Mount now"))
 
         # Unmount and lock externally, adjust fstab with Cockpit
 
-        m.execute("umount /run/foo")
-        m.execute(f"udisksctl lock -b {dev}")
+        m.execute("while mountpoint -q /run/foo && ! umount /run/foo; do sleep 0.2; done;")
+        m.execute(f"udisksctl lock -b {disk}")
         # wait until the UI updated to the locking
-        self.content_tab_wait_in_info(1, 2, "Cleartext device", "-")
-        fsys_tab = self.content_tab_expand(1, 1)
-        b.click(fsys_tab + " button:contains(Do not mount automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Do not mount automatically on boot)")
+        b.wait_text(self.card_desc("Encryption", "Cleartext device"), "-")
+        b.click(self.card_button("Filesystem", "Do not mount automatically on boot"))
+        b.wait_not_present(self.card_button("Filesystem", "Do not mount automatically on boot"))
 
         # Unlock and mount externally, unmount and lock with Cockpit
 
-        m.execute(f"echo -n vainu-reku-toma-rolle-kaja | udisksctl unlock --key-file /dev/stdin -b {dev}")
+        m.execute(f"echo -n vainu-reku-toma-rolle-kaja | udisksctl unlock --key-file /dev/stdin -b {disk}")
         m.execute("mount /run/foo")
-        b.click(fsys_tab + " button:contains(Unmount now)")
-        b.wait_not_present(fsys_tab + " button:contains(Unmount now)")
+        b.click(self.card_button("ext4 filesystem", "Unmount now"))
+        b.wait_visible(self.card("Filesystem"))
+        b.wait_not_present(self.card_button("Filesystem", "Unmount now"))
 
         # Unlock and mount externally, adjust fstab with Cockpit
 
-        m.execute(f"echo -n vainu-reku-toma-rolle-kaja | udisksctl unlock --key-file /dev/stdin -b {dev}")
+        m.execute(f"echo -n vainu-reku-toma-rolle-kaja | udisksctl unlock --key-file /dev/stdin -b {disk}")
         m.execute("mount /run/foo")
-        b.click(fsys_tab + " button:contains(Mount also automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Mount also automatically on boot)")
+        b.click(self.card_button("ext4 filesystem", "Mount also automatically on boot"))
+        b.wait_not_present(self.card_button("ext4 filesystem", "Mount also automatically on boot"))
+        b.wait_visible(self.card("ext4 filesystem"))
 
         # Add noauto to crypttab (but not fstab), remove with Cockpit
 
         m.execute("sed -i -e 's/xxx/xxx,noauto/' /etc/crypttab")
-        b.click(fsys_tab + " button:contains(Unlock automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Unlock automatically on boot)")
+        b.click(self.card_button("ext4 filesystem", "Unlock automatically on boot"))
+        b.wait_not_present(self.card_button("ext4 filesystem", "Unlock automatically on boot"))
+        b.wait_visible(self.card("ext4 filesystem"))
 
         # Add noauto to crypttab (but not fstab), add also to fstab with Cockpit
 
         m.execute("sed -i -e 's/xxx/xxx,noauto/' /etc/crypttab")
-        b.click(fsys_tab + " button:contains(Do not mount automatically on boot)")
-        b.wait_not_present(fsys_tab + " button:contains(Do not mount automatically on boot)")
+        b.click(self.card_button("ext4 filesystem", "Do not mount automatically on boot"))
+        b.wait_not_present(self.card_button("ext4 filesystem", "Do not mount automatically on boot"))
+        b.wait_visible(self.card("ext4 filesystem"))
 
     def testDuplicateMountPoints(self):
         m = self.machine
@@ -289,62 +493,54 @@ ExecStart=/usr/bin/sleep infinity
 
         self.login_and_go("/storage")
 
+        self.addCleanupVG("test")
+        self.addCleanup(m.execute, "cryptsetup close $(lsblk -lno NAME /dev/test/one | tail -1) || true")
+        self.addCleanupMount("/run/data")
+
         # Quickly make two logical volumes
-        m.add_disk("50M", serial="MYDISK")
-        b.wait_in_text("#drives", "MYDISK")
-        m.execute("vgcreate test /dev/sda; lvcreate test -n one -L 20M; lvcreate test -n two -L 20M")
-        b.click('#devices .sidepanel-row:contains("test")')
-        b.wait_visible("#storage-detail")
-        self.content_row_wait_in_col(1, 1, "one")
-        self.content_row_wait_in_col(2, 1, "two")
+        disk = self.add_ram_disk()
+        b.wait_visible(self.card_row("Storage", name=disk))
+        m.execute(f"vgcreate test {disk}; lvcreate test -n one -L 20M; lvcreate test -n two -L 20M")
+        self.click_card_row("Storage", name="test")
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 1), "one")
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 2, 1), "two")
 
         # Encrypt and format the first and give it /run/data as the mount point
-        self.content_row_action(1, "Format")
+        self.click_card_row("LVM2 logical volumes", 1)
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog({"type": "ext4",
                      "crypto": self.default_crypto_type,
                      "passphrase": "vainu-reku-toma-rolle-kaja",
                      "passphrase2": "vainu-reku-toma-rolle-kaja",
                      "mount_point": "/run/data"})
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-        self.content_tab_wait_in_info(1, 2, "Mount point", "/run/data")
+        b.click(self.card_parent_link())
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 2), "ext4 filesystem (encrypted)")
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 3), "/run/data")
 
         # Format the second and also try to use /run/data as the mount point
-        self.content_row_action(2, "Format")
+        self.click_card_row("LVM2 logical volumes", 2)
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog_wait_open()
         self.dialog_set_val("type", "ext4")
         self.dialog_set_val("mount_point", "/run/data")
         self.dialog_apply()
         self.dialog_wait_error("mount_point", "Mount point is already used for /dev/test/one")
+        self.dialog_set_val("mount_point", "/run/data")  # to clear the error
+        self.dialog_apply_secondary()
+        self.dialog_wait_error("mount_point", "Mount point is already used for /dev/test/one")
         self.dialog_cancel()
         self.dialog_wait_close()
+        b.click(self.card_parent_link())
 
         # Format the first and re-use /run/data as the mount point.
         # This should be allowed.
-        self.content_dropdown_action(1, "Format")
+        self.click_card_row("LVM2 logical volumes", 1)
+        self.click_card_dropdown("ext4 filesystem", "Format")
         self.dialog({"type": "ext4",
                      "mount_point": "/run/data"})
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-        self.content_tab_wait_in_info(1, 2, "Mount point", "/run/data")
-
-    def testFirstMount(self):
-        m = self.machine
-        b = self.browser
-
-        self.login_and_go("/storage")
-
-        m.add_disk("50M", serial="MYDISK")
-        b.click("#drives .sidepanel-row:contains(MYDISK)")
-        b.wait_visible("#storage-detail")
-
-        m.execute("mkfs.ext4 /dev/sda")
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-
-        m.execute("! grep /run/data /etc/fstab")
-        self.content_row_action(1, "Mount")
-        self.dialog({"mount_point": "/run/data",
-                     "mount_options.extra": "x-foo"})
-        m.execute("grep /run/data /etc/fstab")
-        m.execute("grep 'x-foo' /etc/fstab")
+        b.click(self.card_parent_link())
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 2), "ext4 filesystem (encrypted)")
+        b.wait_text(self.card_row_col("LVM2 logical volumes", 1, 3), "/run/data")
 
     def testNeverAuto(self):
         m = self.machine
@@ -353,47 +549,43 @@ ExecStart=/usr/bin/sleep infinity
         self.login_and_go("/storage")
 
         # Add a disk and format it with luks and a filesystem, but with "Never unlock at boot"
+        disk = self.add_ram_disk()
+        self.click_card_row("Storage", name=disk)
 
-        m.add_disk("50M", serial="MYDISK")
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('.sidepanel-row:contains("MYDISK")')
-        b.wait_visible("#storage-detail")
-
-        self.content_row_action(1, "Format")
+        self.click_card_dropdown("Unformatted data", "Format")
         self.dialog({"type": "ext4",
                      "crypto": self.default_crypto_type,
                      "passphrase": "vainu-reku-toma-rolle-kaja",
                      "passphrase2": "vainu-reku-toma-rolle-kaja",
                      "at_boot": "never",
                      "mount_point": "/run/foo"})
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem (encrypted)")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "never mount at boot")
+        b.wait_in_text(self.card_desc("ext4 filesystem", "Mount point"), "never mount at boot")
 
         # The filesystem should be mounted but have the "noauto"
         # option in both fstab and crypttab
-        self.wait_mounted(1, 1)
+        self.wait_mounted("ext4 filesystem")
         self.assertIn("noauto", m.execute("grep /run/foo /etc/fstab || true"))
         self.assertNotEqual(m.execute("grep noauto /etc/crypttab"), "")
 
         # Unmounting should keep the noauto option, as always
-        self.content_dropdown_action(1, "Unmount")
+        b.click(self.card_button("ext4 filesystem", "Unmount"))
         self.confirm()
-        self.content_tab_wait_in_info(1, 1, "Mount point", "The filesystem is not mounted")
+        self.wait_not_mounted("Filesystem")
         self.assertIn("noauto", m.execute("grep /run/foo /etc/fstab || true"))
         self.assertNotEqual(m.execute("grep noauto /etc/crypttab"), "")
 
         # Mounting should also keep the "noauto", but it should not show up in the extra options
-        self.content_row_action(1, "Mount")
+        b.click(self.card_button("Filesystem", "Mount"))
         self.dialog_check({"mount_options.extra": False})
         self.dialog_set_val("passphrase", "vainu-reku-toma-rolle-kaja")
         self.dialog_apply()
         self.dialog_wait_close()
-        self.wait_mounted(1, 1)
+        self.wait_mounted("ext4 filesystem")
         self.assertIn("noauto", m.execute("grep /run/foo /etc/fstab || true"))
         self.assertNotEqual(m.execute("grep noauto /etc/crypttab"), "")
 
         # As should updating the mount information
-        self.content_tab_info_action(1, 1, "Mount point")
+        b.click(self.card_desc("ext4 filesystem", "Mount point") + " button")
         self.dialog_check({"mount_options.extra": False})
         self.dialog_apply()
         self.dialog_wait_close()
@@ -402,128 +594,114 @@ ExecStart=/usr/bin/sleep infinity
 
         # Removing "noauto" from fstab but not from crypttab externally should show a warning
         m.execute("sed -i -e 's/noauto//' /etc/fstab")
-        fsys_tab = self.content_tab_expand(1, 1)
-        b.wait_in_text(fsys_tab, "The filesystem is configured to be automatically mounted on boot but its encryption container will not be unlocked at that time.")
-        b.click(fsys_tab + " button:contains(Do not mount automatically)")
-        b.wait_not_present(fsys_tab + " button:contains(Do not mount automatically)")
+        b.wait_in_text(self.card("ext4 filesystem"),
+                       "The filesystem is configured to be automatically mounted on boot but its encryption container will not be unlocked at that time.")
+        b.click(self.card_button("ext4 filesystem", "Do not mount automatically"))
+        b.wait_not_present(self.card_button("ext4 filesystem", "Do not mount automatically"))
 
-    def testBadOption(self):
+    def testOverMounting(self):
         m = self.machine
         b = self.browser
 
         self.login_and_go("/storage")
 
-        m.add_disk("50M", serial="MYDISK")
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('.sidepanel-row:contains("MYDISK")')
-        b.wait_visible("#storage-detail")
+        # Add a disk and make two partitions on it, one on /run/foo
+        # and one on /run/foo/bar
 
-        self.content_row_action(1, "Format")
+        disk = self.add_ram_disk(100)
+        self.click_card_row("Storage", name=disk)
+
+        self.click_card_dropdown("Solid State Drive", "Create partition table")
+        self.dialog({"type": "gpt"})
+        b.wait_text(self.card_row_col("GPT partitions", 1, 1), "Free space")
+
+        self.click_dropdown(self.card_row("GPT partitions", 1), "Create partition")
         self.dialog({"type": "ext4",
+                     "size": 50,
+                     "crypto": self.default_crypto_type,
+                     "passphrase": "vainu-reku-toma-rolle-kaja",
+                     "passphrase2": "vainu-reku-toma-rolle-kaja",
                      "mount_point": "/run/foo"},
                     secondary=True)
-        self.content_row_wait_in_col(1, 2, "ext4 filesystem")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "The filesystem is not mounted")
-        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
+        b.wait_text(self.card_row_col("GPT partitions", 1, 3), "/run/foo (not mounted)")
 
-        self.content_row_action(1, "Mount")
-        self.dialog_wait_open()
-        self.dialog_set_val("mount_options.extra", "hurr")
-        self.dialog_apply()
-        self.dialog_wait_alert("bad option")
-        self.dialog_cancel()
-        self.dialog_wait_close()
-
-        # No changes should have been done to fstab, and the
-        # filesystem should not be mounted.
-        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
-        self.assertNotIn("hurr", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
-        self.wait_not_mounted(1, 1)
-
-        # Mount
-        self.content_row_action(1, "Mount")
-        self.dialog({})
-
-        # Apply the dialog without changes and verify that the
-        # filesystem is still mounted afterwards.  Cockpit used to
-        # have a bug where this would accidentally unmount the
-        # filesystem.
-
-        self.content_tab_info_action(1, 1, "Mount point")
-        self.dialog({})
-        self.wait_mounted(1, 1)
-
-        # Try to set a bad option while the filesystem is mounted.
-        self.content_tab_info_action(1, 1, "Mount point")
-        self.dialog_wait_open()
-        self.dialog_set_val("mount_options.extra", "hurr")
-        self.dialog_apply()
-        self.dialog_wait_alert("bad option")
-        self.dialog_cancel()
-        self.dialog_wait_close()
-
-        self.assertNotIn("hurr", m.execute("findmnt --fstab -n -o OPTIONS /run/foo"))
-        self.wait_mounted(1, 1)
-
-    def testAtBoot(self):
-        m = self.machine
-        b = self.browser
-
-        self.login_and_go("/storage")
-
-        info = m.add_disk("50M", serial="MYDISK")
-        dev = "/dev/" + info['dev']
-        b.wait_in_text("#drives", "MYDISK")
-        b.click('.sidepanel-row:contains("MYDISK")')
-        b.wait_visible("#storage-detail")
-
-        self.content_row_action(1, "Format")
+        self.click_dropdown(self.card_row("GPT partitions", 2), "Create partition")
         self.dialog({"type": "ext4",
-                     "mount_point": "/foo",
-                     "at_boot": "local",
-                     "crypto": "luks1",
-                     "passphrase": "foobarfoo",
-                     "passphrase2": "foobarfoo"},
+                     "crypto": self.default_crypto_type,
+                     "passphrase": "vainu-reku-toma-rolle-kaja",
+                     "passphrase2": "vainu-reku-toma-rolle-kaja",
+                     "mount_point": "/run/foo/bar"},
                     secondary=True)
-        self.content_row_wait_in_col(1, 2, "Filesystem (encrypted)")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "The filesystem is not mounted")
-        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
-        self.assert_in_configuration(dev, "crypttab", "options", "noauto")
+        b.wait_text(self.card_row_col("GPT partitions", 2, 3), "/run/foo/bar (not mounted)")
 
-        def mount(expected_at_boot, at_boot):
-            self.content_row_action(1, "Mount")
-            self.dialog_wait_open()
-            self.dialog_wait_val("at_boot", expected_at_boot)
-            self.dialog_set_val("at_boot", at_boot)
-            self.dialog_set_val("passphrase", "foobarfoo")
-            self.dialog_apply()
-            self.dialog_wait_close()
+        # Mount /run/foo/bar first and check that mounting /run/foo is
+        # rejected
 
-        def unmount():
-            self.content_dropdown_action(1, "Unmount")
-            self.dialog_wait_open()
-            self.dialog_apply()
-            self.dialog_wait_close()
-            self.content_tab_wait_in_info(1, 1, "Mount point", "The filesystem is not mounted")
+        self.click_dropdown(self.card_row("GPT partitions", 2), "Mount")
+        self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
+        b.wait_text(self.card_row_col("GPT partitions", 2, 3), "/run/foo/bar")
 
-        mount("local", "nofail")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "ignore failure")
-        self.assertIn("nofail", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
-        self.assert_in_configuration(dev, "crypttab", "options", "nofail")
-        unmount()
+        self.click_dropdown(self.card_row("GPT partitions", 1), "Mount")
+        self.dialog_wait_open()
+        self.dialog_set_val("passphrase", "vainu-reku-toma-rolle-kaja")
+        self.dialog_apply()
+        self.dialog_wait_error("mount_point", "Filesystems are already mounted below this mountpoint.")
+        b.assert_pixels("#dialog", "overmounting-rejection")
+        self.dialog_cancel()
+        self.dialog_wait_close()
 
-        mount("nofail", "netdev")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "after network")
-        self.assertIn("_netdev", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
-        self.assert_in_configuration(dev, "crypttab", "options", "_netdev")
-        unmount()
+        # Unmount /run/foo/bar, mount /run/foo, mount /run/foo/bar
+        # again and then check that unmounting /run/foo will also
+        # unmount /run/foo/bar.
 
-        mount("netdev", "never")
-        self.content_tab_wait_in_info(1, 1, "Mount point", "never mount")
-        self.assertIn("x-cockpit-never-auto", m.execute("findmnt --fstab -n -o OPTIONS /foo"))
-        self.assert_in_configuration(dev, "crypttab", "options", "noauto")
-        unmount()
+        self.click_dropdown(self.card_row("GPT partitions", 2), "Unmount")
+        self.confirm()
+
+        self.click_dropdown(self.card_row("GPT partitions", 1), "Mount")
+        self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
+        b.wait_text(self.card_row_col("GPT partitions", 1, 3), "/run/foo")
+
+        self.click_dropdown(self.card_row("GPT partitions", 2), "Mount")
+        self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
+        b.wait_text(self.card_row_col("GPT partitions", 2, 3), "/run/foo/bar")
+
+        self.click_dropdown(self.card_row("GPT partitions", 1), "Unmount")
+        self.dialog_wait_open()
+        b.wait_in_text("#dialog tr:contains('/run/foo/bar')", "unmount")
+        self.dialog_apply()
+        self.dialog_wait_close()
+
+        # Now /run/foo/bar should be noauto.
+        self.assert_in_configuration(disk + "2", "crypttab", "options", "noauto")
+        self.assertIn("noauto", m.execute("findmnt --fstab -n -o OPTIONS /run/foo/bar"))
+
+        # Mount them again and check that initializing the disk will
+        # unmount /run/foo/bar first.
+
+        self.click_dropdown(self.card_row("GPT partitions", 1), "Mount")
+        self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
+        b.wait_text(self.card_row_col("GPT partitions", 1, 3), "/run/foo")
+
+        self.click_dropdown(self.card_row("GPT partitions", 2), "Mount")
+        self.dialog({"passphrase": "vainu-reku-toma-rolle-kaja"})
+        b.wait_text(self.card_row_col("GPT partitions", 2, 3), "/run/foo/bar")
+
+        # Sometimes a block device is still held open by
+        # something immediately after locking it. This
+        # prevents the kernel from reading the new partition
+        # table. Let's just retry in that case.
+
+        def first_setup():
+            b.wait_text("#dialog tbody:nth-of-type(1) td[data-label=Location]", "/run/foo/bar")
+            b.wait_text("#dialog tbody:nth-of-type(2) td[data-label=Location]", "/run/foo")
+
+        self.dialog_with_error_retry(trigger=lambda: self.click_card_dropdown("Solid State Drive",
+                                                                              "Create partition table"),
+                                     first_setup=first_setup,
+                                     errors=["Timed out waiting for object"])
+
+        b.wait_text(self.card_row_col("GPT partitions", 1, 1), "Free space")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

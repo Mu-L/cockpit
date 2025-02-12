@@ -14,12 +14,14 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
 import React from "react";
 
+import { Flex } from "@patternfly/react-core/dist/esm/layouts/Flex/index.js";
+import { Spinner } from "@patternfly/react-core/dist/esm/components/Spinner/index.js";
 import { WarningTriangleIcon } from "@patternfly/react-icons";
 
 import { show_modal_dialog } from "cockpit-components-dialog.jsx";
@@ -92,10 +94,10 @@ export function install_dialog(pkg, options) {
 
         if (progress_message)
             footer_message = (
-                <>
+                <Flex spaceItems={{ default: 'spaceItemsSm' }} alignItems={{ default: 'alignItemsCenter' }}>
                     <span>{ progress_message }</span>
-                    <div className="spinner spinner-sm" />
-                </>
+                    <Spinner size="sm" />
+                </Flex>
             );
         else if (data?.download_size) {
             footer_message = (

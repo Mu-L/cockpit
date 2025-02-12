@@ -17,25 +17,28 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
-import pwd
 import os
+import pwd
 import shlex
 import socket
-import sys
+import stat
+import subprocess
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Type
 
-from typing import Dict, Iterable, List, Tuple, Type
-
+from cockpit._vendor.ferny import interaction_client
 from cockpit._vendor.systemd_ctypes import bus, run_async
 
 from . import polyfills
-
+from ._version import __version__
 from .channel import ChannelRoutingRule
 from .channels import CHANNEL_TYPES
 from .config import Config, Environment
 from .internal_endpoints import EXPORTS
-from .packages import Packages, PackagesListener
+from .jsonutil import JsonError, JsonObject, get_dict
+from .packages import BridgeConfig, Packages, PackagesListener
 from .peer import PeersRoutingRule
 from .remote import HostRoutingRule
 from .router import Router
@@ -60,25 +63,39 @@ class InternalBus:
 
 class Bridge(Router, PackagesListener):
     internal_bus: InternalBus
-    packages: Packages
-    bridge_rules: List[Dict[str, object]]
+    packages: Optional[Packages]
+    bridge_configs: Sequence[BridgeConfig]
     args: argparse.Namespace
 
     def __init__(self, args: argparse.Namespace):
         self.internal_bus = InternalBus(EXPORTS)
-        self.packages = Packages(self)
-        self.bridge_rules = []
+        self.bridge_configs = []
         self.args = args
 
-        self.superuser_rule = SuperuserRoutingRule(self, args.privileged)
+        self.superuser_rule = SuperuserRoutingRule(self, privileged=args.privileged)
         self.internal_bus.export('/superuser', self.superuser_rule)
-        self.internal_bus.export('/packages', self.packages)
+
         self.internal_bus.export('/config', Config())
         self.internal_bus.export('/environment', Environment())
 
         self.peers_rule = PeersRoutingRule(self)
 
-        self.packages_loaded()
+        if args.beipack:
+            # Some special stuff for beipack
+            self.superuser_rule.set_configs((
+                BridgeConfig({
+                    "privileged": True,
+                    "spawn": ["sudo", "-k", "-A", "python3", "-ic", "# cockpit-bridge", "--privileged"],
+                    "environ": ["SUDO_ASKPASS=ferny-askpass"],
+                }),
+            ))
+            self.packages = None
+        elif args.privileged:
+            self.packages = None
+        else:
+            self.packages = Packages(self)
+            self.internal_bus.export('/packages', self.packages)
+            self.packages_loaded()
 
         super().__init__([
             HostRoutingRule(self),
@@ -95,28 +112,36 @@ class Bridge(Router, PackagesListener):
             try:
                 file = open('/usr/lib/os-release', encoding='utf-8')
             except FileNotFoundError:
-                logger.warn("Neither /etc/os-release nor /usr/lib/os-release exists")
+                logger.warning("Neither /etc/os-release nor /usr/lib/os-release exists")
                 return {}
 
-        with file:
-            lexer = shlex.shlex(file, posix=True, punctuation_chars=True)
-            return dict(token.split('=', 1) for token in lexer)
+        return parse_os_release(file.read())
 
-    def do_init(self, message: Dict[str, object]) -> None:
-        superuser = message.get('superuser')
-        if isinstance(superuser, dict):
+    def do_init(self, message: JsonObject) -> None:
+        # we're only interested in the case where this is a dict, but
+        # 'superuser' may well be `False` and that's not an error
+        with contextlib.suppress(JsonError):
+            superuser = get_dict(message, 'superuser')
             self.superuser_rule.init(superuser)
 
     def do_send_init(self) -> None:
-        self.write_control(command='init', version=1,
-                           checksum=self.packages.checksum,
-                           packages={p: None for p in self.packages.packages},
-                           os_release=self.get_os_release(), capabilities={'explicit-superuser': True})
+        init_args = {
+            'capabilities': {'explicit-superuser': True},
+            'command': 'init',
+            'os-release': self.get_os_release(),
+            'version': 1,
+        }
+
+        if self.packages is not None:
+            init_args['packages'] = dict.fromkeys(self.packages.packages)
+
+        self.write_control(init_args)
 
     # PackagesListener interface
-    def packages_loaded(self):
+    def packages_loaded(self) -> None:
+        assert self.packages
         bridge_configs = self.packages.get_bridge_configs()
-        if self.bridge_rules != bridge_configs:
+        if self.bridge_configs != bridge_configs:
             self.superuser_rule.set_configs(bridge_configs)
             self.peers_rule.set_configs(bridge_configs)
             self.bridge_configs = bridge_configs
@@ -145,31 +170,54 @@ async def run(args) -> None:
 
 
 def try_to_receive_stderr():
-    fds = []
     try:
-        stderr_socket = socket.fromfd(2, socket.AF_UNIX, socket.SOCK_STREAM)
         ours, theirs = socket.socketpair()
-        socket.send_fds(stderr_socket, [b'\0ferny\0(["send-stderr"], {})'], [theirs.fileno(), 1])
-        theirs.close()
-        _msg, fds, _flags, _addr = socket.recv_fds(ours, 1, 1)
+        with ours:
+            with theirs:
+                interaction_client.command(2, 'cockpit.send-stderr', fds=[theirs.fileno()])
+            _msg, fds, _flags, _addr = socket.recv_fds(ours, 1, 1)
     except OSError:
         return
 
-    if fds:
-        # This is our new stderr.  We have to be careful not to leak it.
+    try:
         stderr_fd, = fds
+        # We're about to abruptly drop our end of the stderr socketpair that we
+        # share with the ferny agent.  ferny would normally treat that as an
+        # unexpected error. Instruct it to do a clean exit, instead.
+        interaction_client.command(2, 'ferny.end')
+        os.dup2(stderr_fd, 2)
+    finally:
+        for fd in fds:
+            os.close(fd)
 
-        try:
-            os.dup2(stderr_fd, 2)
-        finally:
-            os.close(stderr_fd)
+
+def setup_journald() -> bool:
+    # If stderr is a socket, prefer systemd-journal logging.  This covers the
+    # case we're already connected to the journal but also the case where we're
+    # talking to the ferny agent, while leaving logging to file or terminal
+    # unaffected.
+    if not stat.S_ISSOCK(os.fstat(2).st_mode):
+        # not a socket?  Don't redirect.
+        return False
+
+    try:
+        import systemd.journal  # type: ignore[import]
+    except ImportError:
+        # No python3-systemd?  Don't redirect.
+        return False
+
+    logging.root.addHandler(systemd.journal.JournalHandler())
+    return True
 
 
-def setup_logging(debug: bool):
+def setup_logging(*, debug: bool) -> None:
     """Setup our logger with optional filtering of modules if COCKPIT_DEBUG env is set"""
 
     modules = os.getenv('COCKPIT_DEBUG', '')
-    logging.basicConfig(format='%(name)s-%(levelname)s: %(message)s')
+
+    # Either setup logging via journal or via formatted messages to stderr
+    if not setup_journald():
+        logging.basicConfig(format='%(name)s-%(levelname)s: %(message)s')
 
     if debug or modules == 'all':
         logging.getLogger().setLevel(level=logging.DEBUG)
@@ -182,34 +230,89 @@ def setup_logging(debug: bool):
             logging.getLogger(module).setLevel(logging.DEBUG)
 
 
-def main() -> None:
-    polyfills.install()
+def parse_os_release(text: str) -> Dict[str, str]:
+    os_release = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        try:
+            k, v = line.split('=')
+            (v_parsed, ) = shlex.split(v)  # expect exactly one token
+        except ValueError:
+            logger.warning('Ignoring invalid line in os-release: %r', line)
+            continue
+        os_release[k] = v_parsed
+    return os_release
 
-    # The --privileged bridge gets spawned with its stderr being consumed by a
-    # pipe used for reading authentication-related message from sudo.  The
-    # absolute first thing we want to do is to recover the original stderr that
-    # we had.
-    if '--privileged' in sys.argv:
-        try_to_receive_stderr()
+
+def start_ssh_agent() -> None:
+    # Launch the agent so that it goes down with us on EOF; PDEATHSIG would be more robust,
+    # but it gets cleared on setgid ssh-agent, which some distros still do
+    try:
+        proc = subprocess.Popen(['ssh-agent', 'sh', '-ec', 'echo SSH_AUTH_SOCK=$SSH_AUTH_SOCK; read a'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, universal_newlines=True)
+        assert proc.stdout is not None
+
+        # Wait for the agent to write at least one line and look for the
+        # listener socket.  If we fail to find it, kill the agent — something
+        # went wrong.
+        for token in shlex.shlex(proc.stdout.readline(), punctuation_chars=True):
+            if token.startswith('SSH_AUTH_SOCK='):
+                os.environ['SSH_AUTH_SOCK'] = token.replace('SSH_AUTH_SOCK=', '', 1)
+                break
+        else:
+            proc.terminate()
+            proc.wait()
+
+    except FileNotFoundError:
+        logger.debug("Couldn't start ssh-agent (FileNotFoundError)")
+
+    except OSError as exc:
+        logger.warning("Could not start ssh-agent: %s", exc)
+
+
+def main(*, beipack: bool = False) -> None:
+    polyfills.install()
 
     parser = argparse.ArgumentParser(description='cockpit-bridge is run automatically inside of a Cockpit session.')
     parser.add_argument('--privileged', action='store_true', help='Privileged copy of the bridge')
     parser.add_argument('--packages', action='store_true', help='Show Cockpit package information')
     parser.add_argument('--bridges', action='store_true', help='Show Cockpit bridges information')
-    parser.add_argument('--rules', action='store_true', help='Show Cockpit bridge rules')
     parser.add_argument('--debug', action='store_true', help='Enable debug output (very verbose)')
     parser.add_argument('--version', action='store_true', help='Show Cockpit version information')
     args = parser.parse_args()
 
-    setup_logging(args.debug)
+    # This is determined by who calls us
+    args.beipack = beipack
 
+    # If we were run with --privileged then our stderr is currently being
+    # consumed by the main bridge looking for startup-related error messages.
+    # Let's switch back to the original stderr stream, which has a side-effect
+    # of indicating that our startup is more or less complete.  Any errors
+    # after this point will land in the journal.
+    if args.privileged:
+        try_to_receive_stderr()
+
+    setup_logging(debug=args.debug)
+
+    # Special modes
     if args.packages:
         Packages().show()
+        return
+    elif args.version:
+        print(f'Version: {__version__}\nProtocol: 1')
+        return
     elif args.bridges:
-        print(json.dumps(Packages().get_bridge_configs(), indent=2))
-    else:
-        # asyncio.run() shim for Python 3.6 support
-        run_async(run(args), debug=args.debug)
+        print(json.dumps([config.__dict__ for config in Packages().get_bridge_configs()], indent=2))
+        return
+
+    # The privileged bridge doesn't need ssh-agent, but the main one does
+    if 'SSH_AUTH_SOCK' not in os.environ and not args.privileged:
+        start_ssh_agent()
+
+    # asyncio.run() shim for Python 3.6 support
+    run_async(run(args), debug=args.debug)
 
 
 if __name__ == '__main__':

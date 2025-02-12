@@ -4,28 +4,28 @@
 
 #firewall,
 #network-page {
-  .pf-c-card {
+  .pf-v5-c-card {
     @extend .ct-card;
   }
 }
 
 #networking, #network-interface {
-  .pf-l-gallery {
-    --pf-l-gallery--GridTemplateColumns: 1fr;
+  .pf-v5-l-gallery {
+    --pf-v5-l-gallery--GridTemplateColumns: 1fr;
   }
 }
 
 // General networking page overview
 .network-page {
   .cockpit-log-panel {
-    max-width: 100vw;
+    max-inline-size: 100vw;
   }
 }
 
 #network-interface {
   @at-root {
     #network-interface-name {
-      font-weight: var(--pf-c-card__title--FontWeight);
+      font-weight: var(--pf-v5-c-card__title--FontWeight);
     }
 
     .network-interface-status > span {
@@ -35,30 +35,30 @@
 }
 
 .network-number-field {
-  max-width: 4em;
+  inline-size: 4em;
 }
 
 .network-graph {
-  height: 180px;
+  block-size: 180px;
 }
 
-.pf-c-page__main-breadcrumb + .networking-graphs {
+.pf-v5-c-page__main-breadcrumb + .networking-graphs {
   // Remove the top padding when following a breadcrumb
-  padding-top: 0;
+  padding-block-start: 0;
 }
 
 // Constrain widths of networking headers (on both the main page and in network-interface-members)
 th {
   &.networking-speed {
-    width: 20%;
+    inline-size: 20%;
   }
 
   &.networking-spacer {
-    width: var(--pf-global--spacer--4xl);
+    inline-size: var(--pf-v5-global--spacer--4xl);
   }
 
   &.networking-action {
-    width: var(--pf-global--spacer--3xl);
+    inline-size: var(--pf-v5-global--spacer--3xl);
   }
 }
 
@@ -66,11 +66,11 @@ th {
   &-title {
     display: grid;
     grid-auto-flow: column;
-    grid-gap: var(--pf-global--spacer--md);
+    grid-gap: var(--pf-v5-global--spacer--md);
   }
 
   &-delete {
-    margin-right: var(--pf-global--spacer--lg);
+    margin-inline-end: var(--pf-v5-global--spacer--lg);
   }
 
   // Seems to be used for the "general" checkbox
@@ -80,51 +80,64 @@ th {
     }
 
     input {
-      margin-left: 0;
+      margin-inline-start: 0;
     }
   }
 }
 
 #networking-interfaces, #networking-unmanaged-interfaces {
   th > .pf-m-link {
-    font-weight: var(--pf-global--FontWeight--bold);
+    font-weight: var(--pf-v5-global--FontWeight--bold);
 
     // Preserve the same baseline as other elements, so items align
     display: inline;
     // Expand the link to the container, for easier clickability
-    width: 100%;
+    inline-size: 100%;
   }
 }
 
 .network-interface-members {
-  .pf-c-switch {
-    margin-right: var(--pf-global--spacer--md);
+  .pf-v5-c-switch {
+    margin-inline-end: var(--pf-v5-global--spacer--md);
   }
 
-  .pf-c-table tbody > tr > * {
+  .pf-v5-c-table tbody > tr > * {
     vertical-align: middle;
   }
 
   .btn-group {
-    padding-top: 0.5rem;
-    padding-bottom: 0.5rem;
+    padding-block: 0.5rem;
   }
 }
 
-// If the button is not the first item in the DescriptionListDescription all left padding
-.network-interface-settings dd .pf-c-description-list__text button:not(:first-child) {
-  padding-left: var(--pf-global--spacer--md);
+// If the button is not the first item in the DescriptionListDescription add left spacing
+.network-interface-settings dd button:not(:first-child) {
+  margin-inline-start: var(--pf-v5-global--spacer--sm);
 }
 
-#network-mtu-settings-custom {
-  position: relative;
-  top: 6px;
+// The modal body, by default, overflows to accommodate extra content. This is
+// normally good. However, it also can trim things that flow outside, such as
+// the focus ring of the MTU custom input. Since we know the modal won't have
+// much vertical content, we can disable the overflow to let the focus ring be
+// fully visible. (Otherwise the bottommost pixels are removed.)
+#network-mtu-settings-dialog .pf-v5-c-modal-box__body {
+  overflow: visible;
 }
 
-#network-mtu-settings-input {
-  margin-left: 0.5em;
-  width: 5em;
-  display: inline;
+// Use a grid to lay out elements. This could've been a flex, but a grid lets
+// us size elements from the parent element instead of having to specify
+// individual elements
+#network-mtu-settings-custom + .pf-v5-c-radio__label {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--pf-v5-global--spacer--md);
+}
+
+// Set the width of the input element; with a little extra space
+.mtu-label-input > input {
+  inline-size: 7ch;
+  font-variant: tabular-nums;
 }
 
 // Temporary curtain to hide the content as it loads
@@ -132,12 +145,12 @@ th {
   z-index: 2000;
 }
 
-.pf-l-flex > .network-ip-settings-method {
-  width: 12rem;
+.pf-v5-l-flex > .network-ip-settings-method {
+  inline-size: 12rem;
 }
 
 #network-ip-settings-body {
-  .pf-c-form__label {
+  .pf-v5-c-form__label {
     // Don't allow labels to wrap
     white-space: nowrap;
   }
@@ -155,10 +168,10 @@ th {
 
 #add-services-dialog {
   .service-list {
-    border: 1px solid var(--pf-c-data-list--BorderTopColor);
-    height: 30rem;
+    border: 1px solid var(--pf-v5-c-data-list--BorderTopColor);
+    block-size: 30rem;
     // full height minus UI, for mobile and small desktops
-    max-height: calc(100vh - 20rem);
+    max-block-size: calc(100vh - 20rem);
     overflow-y: auto;
   }
 
@@ -176,7 +189,7 @@ th {
     opacity: 0.75;
 
     &:first-of-type {
-      margin-right: 1em;
+      margin-inline-end: 1em;
     }
   }
 
@@ -196,16 +209,16 @@ th {
 }
 
 #firewall {
-  height: 100%;
+  block-size: 100%;
 
   .ct-table tbody tr:first-of-type td:nth-child(2) {
-    font-weight: var(--pf-global--FontWeight--bold);
+    font-weight: var(--pf-v5-global--FontWeight--bold);
   }
 }
 
-@media screen and (max-width: $pf-global--breakpoint--md) {
-  .zone-section-heading.pf-c-card__header {
-    padding-left: var(--pf-global--spacer--md);
+@media screen and (max-width: $pf-v5-global--breakpoint--md) {
+  .zone-section-heading.pf-v5-c-card__header {
+    padding-inline-start: var(--pf-v5-global--spacer--md);
   }
 }
 
@@ -217,14 +230,14 @@ th {
 
 #add-zone-dialog legend {
   color: var(--ct-color-subtle-copy);
-  font-size: var(--pf-global--FontSize--sm);
+  font-size: var(--pf-v5-global--FontSize--sm);
 }
 
 .add-zone-zones legend {
   line-height: 3;
 }
 
-#add-zone-dialog .add-zone-zones .pf-c-radio__label {
+#add-zone-dialog .add-zone-zones .pf-v5-c-radio__label {
   text-transform: capitalize;
 }
 
@@ -233,25 +246,25 @@ th {
   input {
     position: relative;
     z-index: 2;
-    width: 16px;
-    height: 16px;
+    inline-size: 16px;
+    block-size: 16px;
   }
 
   > label {
     /* FIXME: Add lines behind the radio buttons */
     &::after {
-      border-bottom: 1px solid #d1d1d1;
+      border-block-end: 1px solid #d1d1d1;
       content: "";
     }
 
     /* Start line at the midpoint for the first radio */
     &:first-of-type::after {
-      left: 50%;
+      inset-inline-start: 50%;
     }
 
     /* End line at the midpoint for the last radio */
     &:last-of-type::after {
-      right: 50%;
+      inset-inline-end: 50%;
     }
   }
 }
@@ -264,7 +277,8 @@ th {
 }
 
 #add-zone-description-readonly {
-  padding: 0.5rem 0 0;
+  padding-block: 0.5rem 0;
+  padding-inline: 0;
   color: var(--ct-color-subtle-copy);
 }
 
@@ -278,20 +292,34 @@ th {
 @keyframes error-slide-down {
   0% {
     line-height: 0;
-    height: 0;
+    block-size: 0;
     opacity: 0;
     overflow: hidden;
   }
 
   100% {
     line-height: inherit;
-    height: auto;
+    block-size: auto;
     opacity: 1;
   }
 }
 
-.pf-c-dropdown__menu-item.pf-m-danger {
-  color: var(--pf-global--danger-color--200);
+.pf-v5-c-dropdown__menu-item.pf-m-danger {
+  color: var(--pf-v5-global--danger-color--200);
+}
+
+// Remove the default top padding from the toolbar
+.filter-services-toolbar {
+  padding-block-start: 0;
+}
+
+// HACK: MenuToggle has inline-block by default which makes it not appear under
+// the entry above
+@media screen and (max-width: $pf-v5-global--breakpoint--sm) {
+  .pf-v5-c-table__td .pf-v5-c-menu-toggle.pf-m-plain {
+    display: inline-flex;
+    align-items: flex-start;
+  }
 }
 
 /* End Firewall specific CSS */

@@ -14,18 +14,20 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 import cockpit from "cockpit";
 import React, { useContext } from "react";
 import { Breadcrumb, BreadcrumbItem } from "@patternfly/react-core/dist/esm/components/Breadcrumb/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { Checkbox } from "@patternfly/react-core/dist/esm/components/Checkbox/index.js";
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
 import { Gallery } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
-import { Page, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Page, PageBreadcrumb, PageSection, PageSectionVariants } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Switch } from "@patternfly/react-core/dist/esm/components/Switch/index.js";
+
+import { Privileged } from "cockpit-components-privileged.jsx";
 
 import { ModelContext } from './model-context.jsx';
 import { NetworkInterfaceMembers } from "./network-interface-members.jsx";
@@ -53,9 +55,8 @@ import {
 import {
     bond_mode_choices,
 } from './bond.jsx';
-import {
-    ipv4_method_choices, ipv6_method_choices,
-} from './ip-settings.jsx';
+
+import { get_ip_method_choices } from './ip-settings.jsx';
 
 const _ = cockpit.gettext;
 
@@ -130,9 +131,9 @@ export const NetworkInterfacePage = ({
 
         function modify() {
             if (iface.MainConnection) {
-                return iface.MainConnection.activate(dev, null).fail(fail);
+                return iface.MainConnection.activate(dev, null).catch(fail);
             } else {
-                return dev.activate_with_settings(ghostSettings, null).fail(fail);
+                return dev.activate_with_settings(ghostSettings, null).catch(fail);
             }
         }
 
@@ -152,9 +153,7 @@ export const NetworkInterfacePage = ({
 
         function modify () {
             return dev.disconnect()
-                    .fail(function (error) {
-                        show_unexpected_error(error);
-                    });
+                    .catch(error => show_unexpected_error(error));
         }
 
         with_checkpoint(model, modify,
@@ -217,7 +216,7 @@ export const NetworkInterfacePage = ({
             mac = iface.MainConnection.Settings.ethernet.assigned_mac_address;
         }
 
-        const can_edit_mac = (iface && iface.MainConnection &&
+        const can_edit_mac = (privileged && iface && iface.MainConnection &&
                               (connection_settings(iface.MainConnection).type == "802-3-ethernet" ||
                                connection_settings(iface.MainConnection).type == "bond"));
 
@@ -264,26 +263,15 @@ export const NetworkInterfacePage = ({
         return (
             <DescriptionListGroup>
                 <DescriptionListTerm>{_("Status")}</DescriptionListTerm>
-                <DescriptionListDescription>
-                    {activeConnection}
-                    {state ? <span>{state}</span> : null}
+                <DescriptionListDescription className="networking-interface-status">
+                    {[activeConnection, state].filter(val => val).join(", ")}
                 </DescriptionListDescription>
             </DescriptionListGroup>
         );
     }
 
     function renderConnectionSettingsRows(con, settings) {
-        if (!isManaged) {
-            return ([
-                <DescriptionListGroup key="not-managed-device">
-                    <DescriptionListDescription>
-                        {_("This device cannot be managed here.")}
-                    </DescriptionListDescription>
-                </DescriptionListGroup>
-            ]);
-        }
-
-        if (!settings)
+        if (!isManaged || !settings)
             return [];
 
         let group_settings = null;
@@ -295,8 +283,7 @@ export const NetworkInterfacePage = ({
             const parts = [];
 
             if (params.method != "manual")
-                parts.push(choice_title((topic == "ipv4") ? ipv4_method_choices : ipv6_method_choices,
-                                        params.method, _("Unknown configuration")));
+                parts.push(choice_title(get_ip_method_choices(topic), params.method, _("Unknown configuration")));
 
             const addr_is_extra = (params.method != "manual");
             const addrs = [];
@@ -328,7 +315,7 @@ export const NetworkInterfacePage = ({
                         <DescriptionListTerm>{_("General")}</DescriptionListTerm>
                         <DescriptionListDescription>
                             <Checkbox id="autoreconnect" isDisabled={!privileged}
-                                      onChange={checked => {
+                                      onChange={(_event, checked) => {
                                           settings.connection.autoconnect = checked;
                                           settings_applier(self.model, dev, con)(settings);
                                       }}
@@ -562,6 +549,19 @@ export const NetworkInterfacePage = ({
             return renderSettingsRow(_("VLAN"), rows, configure);
         }
 
+        function renderWireGuardSettingsRow() {
+            const rows = [];
+            const options = settings.wireguard;
+
+            if (!options) {
+                return null;
+            }
+
+            const configure = <NetworkAction type="wg" iface={iface} connectionSettings={settings} />;
+
+            return renderSettingsRow(_("WireGuard"), rows, configure);
+        }
+
         return [
             render_group(),
             renderAutoconnectRow(),
@@ -573,7 +573,8 @@ export const NetworkInterfacePage = ({
             renderBridgePortSettingsRow(),
             renderBondSettingsRow(),
             renderTeamSettingsRow(),
-            renderTeamPortSettingsRow()
+            renderTeamPortSettingsRow(),
+            renderWireGuardSettingsRow(),
         ];
     }
 
@@ -673,56 +674,64 @@ export const NetworkInterfacePage = ({
     let onoff;
     if (isManaged) {
         onoff = (
-            <Switch isChecked={!!(dev && dev.ActiveConnection)}
-                    isDisabled={!iface || (dev && dev.State == 20)}
-                    onChange={enable => enable ? connect() : disconnect()}
-                    aria-label={_("Enable or disable the device")} />
+            <Privileged allowed={privileged}
+                        tooltipId="interface-switch"
+                        excuse={ _("Not permitted to configure network devices") }>
+                <Switch id="interface-switch"
+                        isChecked={!!(dev && dev.ActiveConnection)}
+                        isDisabled={!iface || (dev && dev.State == 20) || !privileged}
+                        onChange={(_event, enable) => enable ? connect() : disconnect()}
+                        aria-label={_("Enable or disable the device")} />
+            </Privileged>
         );
     }
 
     const isDeletable = (iface && !dev) || (dev && (dev.DeviceType == 'bond' ||
                                                     dev.DeviceType == 'team' ||
                                                     dev.DeviceType == 'vlan' ||
-                                                    dev.DeviceType == 'bridge'));
+                                                    dev.DeviceType == 'bridge' ||
+                                                    dev.DeviceType == 'wireguard'));
 
     const settingsRows = renderConnectionSettingsRows(iface.MainConnection, connectionSettings)
             .map((component, idx) => <React.Fragment key={idx}>{component}</React.Fragment>);
 
     return (
-        <Page groupProps={{ sticky: 'top' }}
-              isBreadcrumbGrouped
-              id="network-interface"
-              data-test-wait={operationInProgress}
-              breadcrumb={
-                  <Breadcrumb>
-                      <BreadcrumbItem to='#/'>
-                          {_("Networking")}
-                      </BreadcrumbItem>
-                      <BreadcrumbItem isActive>
-                          {dev_name}
-                      </BreadcrumbItem>
-                  </Breadcrumb>}>
+        <Page id="network-interface"
+              data-test-wait={operationInProgress}>
+            <PageBreadcrumb stickyOnBreakpoint={{ default: "top" }}>
+                <Breadcrumb>
+                    <BreadcrumbItem to='#/'>
+                        {_("Networking")}
+                    </BreadcrumbItem>
+                    <BreadcrumbItem isActive>
+                        {dev_name}
+                    </BreadcrumbItem>
+                </Breadcrumb>
+            </PageBreadcrumb>
             <PageSection variant={PageSectionVariants.light}>
                 <NetworkPlots plot_state={plot_state} />
             </PageSection>
             <PageSection>
                 <Gallery hasGutter>
                     <Card className="network-interface-details">
-                        <CardHeader>
+                        <CardHeader actions={{
+                            actions: (
+                                <>
+                                    {isDeletable && isManaged &&
+                                    <Button variant="danger"
+                                                 onClick={syn_click(model, deleteConnections)}
+                                                 id="network-interface-delete">
+                                        {_("Delete")}
+                                    </Button>}
+                                    {onoff}
+                                </>
+                            ),
+                        }}>
                             <CardTitle className="network-interface-details-title">
                                 <span id="network-interface-name">{dev_name}</span>
                                 <span id="network-interface-hw">{renderDesc()}</span>
                                 <span id="network-interface-mac">{renderMac()}</span>
                             </CardTitle>
-                            <CardActions>
-                                {isDeletable && isManaged &&
-                                <Button variant="danger"
-                                         onClick={syn_click(model, deleteConnections)}
-                                         id="network-interface-delete">
-                                    {_("Delete")}
-                                </Button>}
-                                {onoff}
-                            </CardActions>
                         </CardHeader>
                         <CardBody>
                             <DescriptionList id="network-interface-settings" className="network-interface-settings pf-m-horizontal-on-sm">
@@ -731,6 +740,12 @@ export const NetworkInterfacePage = ({
                                 {settingsRows}
                             </DescriptionList>
                         </CardBody>
+                        { !isManaged
+                            ? <CardBody>
+                                {_("This device cannot be managed here.")}
+                            </CardBody>
+                            : null
+                        }
                     </Card>
                     {renderConnectionMembers(iface.MainConnection)}
                 </Gallery>

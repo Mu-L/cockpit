@@ -3,6 +3,7 @@ bin_PROGRAMS =
 libexec_PROGRAMS =
 libexec_SCRIPTS =
 sbin_PROGRAMS =
+PYTHON3 ?= python3
 
 # -----------------------------------------------------------------------------
 #  Python
@@ -20,26 +21,26 @@ pytest-cov: $(BUILT_SOURCES) $(DIST_STAMP) $(MANIFESTS)
 	$(MAKE) test-server
 	cd '$(srcdir)' && abs_builddir='$(abs_builddir)' pytest --cov
 
-PYTHON_BRIDGE_FILES = \
-	src/cockpit/__init__.py \
-	src/cockpit/bridge.py \
-	src/cockpit/channel.py \
-	src/cockpit/channels/__init__.py \
-	src/cockpit/channels/dbus.py \
-	src/cockpit/channels/filesystem.py \
-	src/cockpit/channels/http.py \
-	src/cockpit/channels/metrics.py \
-	src/cockpit/channels/packages.py \
-	src/cockpit/channels/stream.py \
-	src/cockpit/channels/trivial.py \
-	src/cockpit/internal_endpoints.py \
-	src/cockpit/packages.py \
-	src/cockpit/peer.py \
-	src/cockpit/protocol.py \
-	src/cockpit/router.py \
-	src/cockpit/samples.py \
-	src/cockpit/transports.py \
-	$(NULL)
+INSTALL_DATA_LOCAL_TARGETS += install-python
+install-python:
+	@# wheel-based installation with .dist-info.
+	@# This needs to work on RHEL8 up through modern Fedora, offline, with
+	@# system packages available to the build.
+	@# See https://github.com/pypa/pip/issues/3063 for --ignore-installed
+	$(PYTHON3) -m pip install --no-index --force-reinstall --ignore-installed --root='$(DESTDIR)/' --prefix='$(prefix)' \
+		"$$($(PYTHON3) '$(srcdir)'/src/build_backend.py --wheel '$(srcdir)' tmp/wheel)"
+	mkdir -p $(DESTDIR)$(libexecdir)
+	mv -t $(DESTDIR)$(libexecdir) $(DESTDIR)$(bindir)/cockpit-askpass
+
+UNINSTALL_LOCAL_TARGETS += uninstall-python
+uninstall-python:
+	rm -rf tmp/wheel
+	rm -f $(DESTDIR)$(libexecdir)/cockpit-askpass
+	rm -f $(DESTDIR)$(bindir)/cockpit-bridge
+	@# HACK: pip uninstall does not know about --root and --prefix
+	rm -r $(DESTDIR)$(prefix)/lib/python*/*-packages/cockpit \
+	      $(DESTDIR)$(prefix)/lib/python*/*-packages/cockpit-*.dist-info
+
 
 # -----------------------------------------------------------------------------
 #  C
@@ -76,11 +77,11 @@ AM_CFLAGS = \
 
 metainfodir = ${datarootdir}/metainfo
 nodist_metainfo_DATA = \
-	src/appstream/org.cockpit-project.cockpit-sosreport.metainfo.xml \
-	src/appstream/org.cockpit-project.cockpit-kdump.metainfo.xml \
-	src/appstream/org.cockpit-project.cockpit-selinux.metainfo.xml \
-	src/appstream/org.cockpit-project.cockpit-storaged.metainfo.xml \
-	src/appstream/org.cockpit-project.cockpit-networkmanager.metainfo.xml \
+	src/appstream/org.cockpit_project.cockpit_sosreport.metainfo.xml \
+	src/appstream/org.cockpit_project.cockpit_kdump.metainfo.xml \
+	src/appstream/org.cockpit_project.cockpit_selinux.metainfo.xml \
+	src/appstream/org.cockpit_project.cockpit_storaged.metainfo.xml \
+	src/appstream/org.cockpit_project.cockpit_networkmanager.metainfo.xml \
 	$(NULL)
 
 metainfo_in = $(patsubst %,%.in,$(nodist_metainfo_DATA))

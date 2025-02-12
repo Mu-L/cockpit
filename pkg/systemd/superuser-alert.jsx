@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -29,15 +29,13 @@ import { superuser } from "superuser.js";
 
 const _ = cockpit.gettext;
 
-export class SuperuserAlert extends React.Component {
-    render () {
-        if (superuser.allowed)
-            return null;
+export const SuperuserAlert = () => {
+    if (superuser.allowed || !superuser.configured)
+        return null;
 
-        return <Alert className="ct-limited-access-alert"
-                      variant="warning" isInline
-                      customIcon={<LockIcon />}
-                      actionClose={<SuperuserButton />}
-        title={_("Web console is running in limited access mode.")} />;
-    }
-}
+    return <Alert className="ct-limited-access-alert"
+                  variant="warning" isInline
+                  customIcon={<LockIcon />}
+                  actionClose={<SuperuserButton />}
+                  title={_("Web console is running in limited access mode.")} />;
+};

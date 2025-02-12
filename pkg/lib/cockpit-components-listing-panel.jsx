@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import PropTypes from 'prop-types';
@@ -55,7 +55,7 @@ export class ListingPanel extends React.Component {
 
         return (
             <div className="ct-listing-panel">
-                {listingDetail && <div className="ct-listing-panel-actions pf-c-tabs">
+                {listingDetail && <div className="ct-listing-panel-actions pf-v5-c-tabs">
                     {listingDetail}
                 </div>}
                 {this.props.tabRenderers.length && <Tabs activeKey={this.state.activeTab} className="ct-listing-panel-tabs" mountOnEnter onSelect={this.handleTabClick}>

@@ -41,7 +41,9 @@ import logging
 import traceback
 import xml.etree.ElementTree as ET
 
-from .._vendor.systemd_ctypes import Bus, BusError, introspection
+from cockpit._vendor import systemd_ctypes
+from cockpit._vendor.systemd_ctypes import Bus, BusError, introspection
+
 from ..channel import Channel, ChannelError
 
 logger = logging.getLogger(__name__)
@@ -60,7 +62,7 @@ logger = logging.getLogger(__name__)
 # channel does this by doing automatic introspection and property
 # retrieval without much direction from the JavaScript client.
 #
-# The details of what exactly is done is not speficied very strictly,
+# The details of what exactly is done is not specified very strictly,
 # and the Python bridge will likely differ from the C bridge
 # significantly. This will be informed by what existing code actually
 # needs, and we might end up with a more concrete description of what
@@ -119,7 +121,9 @@ class InterfaceCache:
         self.cache.update(interfaces)
 
     async def introspect_path(self, bus, destination, object_path):
-        xml, = await bus.call_method_async(destination, object_path, 'org.freedesktop.DBus.Introspectable', 'Introspect')
+        xml, = await bus.call_method_async(destination, object_path,
+                                           'org.freedesktop.DBus.Introspectable',
+                                           'Introspect')
 
         et = ET.fromstring(xml)
 
@@ -159,10 +163,11 @@ class InterfaceCache:
 
 
 def notify_update(notify, path, interface_name, props):
-    notify.setdefault(path, {})[interface_name] = {k: v['v'] for k, v in props.items()}
+    notify.setdefault(path, {})[interface_name] = {k: v.value for k, v in props.items()}
 
 
 class DBusChannel(Channel):
+    json_encoder = systemd_ctypes.JSONEncoder(indent=2)
     payload = 'dbus-json3'
 
     matches = None
@@ -176,10 +181,10 @@ class DBusChannel(Channel):
             # notifications. cockpit.js relies on that.
             if self.owner != owner:
                 self.owner = owner
-                self.send_message(owner=owner)
+                self.send_json(owner=owner)
 
         def handler(message):
-            name, old, new = message.get_body()
+            _name, _old, new = message.get_body()
             send_owner(owner=new if new != "" else None)
         self.add_signal_handler(handler,
                                 sender='org.freedesktop.DBus',
@@ -202,9 +207,9 @@ class DBusChannel(Channel):
                                                      "/org/freedesktop/DBus",
                                                      "org.freedesktop.DBus",
                                                      "StartServiceByName", "su", self.name, 0)
-                except BusError as error:
-                    logger.debug("Failed to start service '%s': %s", self.name, error.message)
-                    self.send_message(owner=None)
+                except BusError as start_error:
+                    logger.debug("Failed to start service '%s': %s", self.name, start_error.message)
+                    self.send_json(owner=None)
             else:
                 logger.debug("Failed to get owner of service '%s': %s", self.name, error.message)
         else:
@@ -218,16 +223,16 @@ class DBusChannel(Channel):
         bus = options.get('bus')
         address = options.get('address')
 
-        if address is not None:
-            if bus is not None and bus != 'none':
-                raise ChannelError('protocol-error', message='only one of "bus" and "address" can be specified')
-            logger.debug('get bus with address %s for %s', address, self.name)
-            self.bus = Bus.new(address=address, bus_client=self.name is not None)
-        elif bus == 'internal':
-            logger.debug('get internal bus for %s', self.name)
-            self.bus = self.router.internal_bus.client
-        else:
-            try:
+        try:
+            if address is not None:
+                if bus is not None and bus != 'none':
+                    raise ChannelError('protocol-error', message='only one of "bus" and "address" can be specified')
+                logger.debug('get bus with address %s for %s', address, self.name)
+                self.bus = Bus.new(address=address, bus_client=self.name is not None)
+            elif bus == 'internal':
+                logger.debug('get internal bus for %s', self.name)
+                self.bus = self.router.internal_bus.client
+            else:
                 if bus == 'session':
                     logger.debug('get session bus for %s', self.name)
                     self.bus = Bus.default_user()
@@ -236,8 +241,8 @@ class DBusChannel(Channel):
                     self.bus = Bus.default_system()
                 else:
                     raise ChannelError('protocol-error', message=f'invalid bus "{bus}"')
-            except OSError as exc:
-                raise ChannelError('protocol-error', message=f'failed to connect to {bus} bus: {exc}') from exc
+        except OSError as exc:
+            raise ChannelError('protocol-error', message=f'failed to connect to {bus} bus: {exc}') from exc
 
         try:
             self.bus.attach_event(None, 0)
@@ -256,7 +261,7 @@ class DBusChannel(Channel):
                     if self.owner:
                         self.ready(unique_name=self.owner)
                     else:
-                        self.close(problem="not-found")
+                        self.close({'problem': 'not-found'})
             self.create_task(get_ready())
         else:
             self.ready()
@@ -300,18 +305,17 @@ class DBusChannel(Channel):
         path, iface, method, args = message['call']
         cookie = message.get('id')
         flags = message.get('flags')
-        type = message.get('type')
 
         timeout = message.get('timeout')
         if timeout is not None:
-            # sd_bus timeout is µs, cockpit API timeout is ms
+            # sd_bus timeout is μs, cockpit API timeout is ms
             timeout *= 1000
         else:
             # sd_bus has no "indefinite" timeout, so use MAX_UINT64
             timeout = 2 ** 64 - 1
 
         # We have to figure out the signature of the call.  Either we got told it:
-        signature = type
+        signature = message.get('type')
 
         # ... or there aren't any arguments
         if signature is None and len(args) == 0:
@@ -323,32 +327,36 @@ class DBusChannel(Channel):
                 logger.debug('Doing introspection request for %s %s', iface, method)
                 signature = await self.cache.get_signature(iface, method, self.bus, self.name, path)
             except BusError as error:
-                self.send_message(error=[error.name, [f'Introspection: {error.message}']], id=cookie)
+                self.send_json(error=[error.name, [f'Introspection: {error.message}']], id=cookie)
                 return
             except KeyError:
-                self.send_message(error=["org.freedesktop.DBus.Error.UnknownMethod",
-                                         [f"Introspection data for method {iface} {method} not available"]], id=cookie)
+                self.send_json(
+                    error=[
+                        "org.freedesktop.DBus.Error.UnknownMethod",
+                        [f"Introspection data for method {iface} {method} not available"]],
+                    id=cookie)
                 return
             except Exception as exc:
-                self.send_message(error=['python.error', [f'Introspection: {str(exc)}']], id=cookie)
+                self.send_json(error=['python.error', [f'Introspection: {exc!s}']], id=cookie)
                 return
 
         try:
-            reply = await self.bus.call_method_async(self.name, path, iface, method, signature, *args,
-                                                     timeout=timeout)
+            method_call = self.bus.message_new_method_call(self.name, path, iface, method, signature, *args)
+            reply = await self.bus.call_async(method_call, timeout=timeout)
             # If the method call has kicked off any signals related to
             # watch processing, wait for that to be done.
             async with self.watch_processing_lock:
                 # TODO: stop hard-coding the endian flag here.
-                self.send_message(reply=[reply], id=cookie,
-                                  flags="<" if flags is not None else None,
-                                  type=type)
+                self.send_json(
+                    reply=[reply.get_body()], id=cookie,
+                    flags="<" if flags is not None else None,
+                    type=reply.get_signature(True))  # noqa: FBT003
         except BusError as error:
             # actually, should send the fields from the message body
-            self.send_message(error=[error.name, [error.message]], id=cookie)
+            self.send_json(error=[error.name, [error.message]], id=cookie)
         except Exception:
             logger.exception("do_call(%s): generic exception", message)
-            self.send_message(error=['python.error', [traceback.format_exc()]], id=cookie)
+            self.send_json(error=['python.error', [traceback.format_exc()]], id=cookie)
 
     async def do_add_match(self, message):
         add_match = message['add-match']
@@ -357,7 +365,7 @@ class DBusChannel(Channel):
         async def match_hit(message):
             logger.debug('got match')
             async with self.watch_processing_lock:
-                self.send_message(signal=[
+                self.send_json(signal=[
                     message.get_path(),
                     message.get_interface(),
                     message.get_member(),
@@ -385,19 +393,21 @@ class DBusChannel(Channel):
                             if mm:
                                 meta.update({name: mm})
                             notify_update(notify, path, name, props)
-                    self.send_message(meta=meta)
-                    self.send_message(notify=notify)
+                    self.send_json(meta=meta)
+                    self.send_json(notify=notify)
             elif member == "InterfacesRemoved":
                 (path, interfaces) = message.get_body()
                 logger.debug('interfaces removed %s %s', path, interfaces)
                 async with self.watch_processing_lock:
-                    notify = {path: {name: None for name in interfaces}}
-                    self.send_message(notify=notify)
+                    notify = {path: dict.fromkeys(interfaces)}
+                    self.send_json(notify=notify)
 
         self.add_async_signal_handler(handler,
                                       path=path,
                                       interface="org.freedesktop.DBus.ObjectManager")
-        objects, = await self.bus.call_method_async(self.name, path, 'org.freedesktop.DBus.ObjectManager', 'GetManagedObjects')
+        objects, = await self.bus.call_method_async(self.name, path,
+                                                    'org.freedesktop.DBus.ObjectManager',
+                                                    'GetManagedObjects')
         for p, ifaces in objects.items():
             for iface, props in ifaces.items():
                 if interface_name is None or iface == interface_name:
@@ -427,7 +437,7 @@ class DBusChannel(Channel):
                     props[inv] = reply
                 notify = {}
                 notify_update(notify, path, name, props)
-                self.send_message(notify=notify)
+                self.send_json(notify=notify)
 
         this_meta = await self.cache.introspect_path(self.bus, self.name, path)
         if interface_name is not None:
@@ -443,11 +453,13 @@ class DBusChannel(Channel):
                                           interface="org.freedesktop.DBus.Properties",
                                           path=path)
 
-        for name, interface in meta.items():
+        for name in meta:
             if name.startswith("org.freedesktop.DBus."):
                 continue
             try:
-                props, = await self.bus.call_method_async(self.name, path, 'org.freedesktop.DBus.Properties', 'GetAll', 's', name)
+                props, = await self.bus.call_method_async(self.name, path,
+                                                          'org.freedesktop.DBus.Properties',
+                                                          'GetAll', 's', name)
                 notify_update(notify, path, name, props)
             except BusError:
                 pass
@@ -464,8 +476,8 @@ class DBusChannel(Channel):
 
         if path is None or cookie is None:
             logger.debug('ignored incomplete watch request %s', message)
-            self.send_message(error=['x.y.z', ['Not Implemented']], id=cookie)
-            self.send_message(reply=[], id=cookie)
+            self.send_json(error=['x.y.z', ['Not Implemented']], id=cookie)
+            self.send_json(reply=[], id=cookie)
             return
 
         try:
@@ -475,12 +487,12 @@ class DBusChannel(Channel):
                 await self.setup_path_watch(path, interface_name, recursive, meta, notify)
                 if recursive:
                     await self.setup_objectmanager_watch(path, interface_name, meta, notify)
-                self.send_message(meta=meta)
-                self.send_message(notify=notify)
-                self.send_message(reply=[], id=message['id'])
+                self.send_json(meta=meta)
+                self.send_json(notify=notify)
+                self.send_json(reply=[], id=message['id'])
         except BusError as error:
             logger.debug("do_watch(%s) caught D-Bus error: %s", message, error.message)
-            self.send_message(error=[error.name, [error.message]], id=cookie)
+            self.send_json(error=[error.name, [error.message]], id=cookie)
 
     async def do_meta(self, message):
         self.cache.inject(message['meta'])
@@ -504,5 +516,5 @@ class DBusChannel(Channel):
     def do_close(self):
         for slot in self.matches:
             slot.cancel()
-        self.matches = None  # error out
+        self.matches = []
         self.close()

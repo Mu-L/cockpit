@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -cimport os, sys; os.execv(os.path.dirname(sys.argv[1]) + "/../common/pywrap", sys.argv)
 
 # This file is part of Cockpit.
 #
@@ -15,21 +15,12 @@
 # Lesser General Public License for more details.
 #
 # You should have received a copy of the GNU Lesser General Public License
-# along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
-
-import parent  # noqa: F401
-from testlib import Error, MachineCase, skipBrowser, skipDistroPackage, skipImage, skipOstree, test_main
-from lib.constants import TEST_OS_DEFAULT
+# along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
 
 import time
 
-FIX_AUDITD = """
-set -e
-mkdir -p /var/log/audit
-touch /var/log/audit.log
-restorecon -r /var/log/audit
-systemctl start auditd
-"""
+import testlib
+from lib.constants import TEST_OS_DEFAULT
 
 # simulate httpd accessing user ~/public_html without httpd_enable_homedirs
 SELINUX_SEBOOL_ALERT_SCRIPT = """
@@ -57,22 +48,18 @@ mv -f ~/.ssh/authorized_keys.test-avc ~/.ssh/authorized_keys
 """
 
 
-@skipDistroPackage()
-class TestSelinux(MachineCase):
+class TestSelinux(testlib.MachineCase):
     provision = {
-        "0": {"memory_mb": 768},
-        "ansible_machine": {"image": TEST_OS_DEFAULT, "memory_mb": 512}
+        "0": {},
+        "ansible_machine": {"image": TEST_OS_DEFAULT, "memory_mb": 650}
     }
 
-    @skipImage("No setroubleshoot", "debian-*", "ubuntu-*", "arch")
-    @skipOstree("No setroubleshoot")
-    @skipBrowser("Firefox needs http to access clipboard", "firefox")
+    @testlib.skipImage("No setroubleshoot", "debian-*", "ubuntu-*", "arch")
+    @testlib.skipOstree("No setroubleshoot")
+    @testlib.skipBrowser("Firefox fails to recognize 'clipboard-read' permission", "firefox")
     def testTroubleshootAlerts(self):
         b = self.browser
         m = self.machine
-
-        # fix audit events first
-        self.machine.execute(FIX_AUDITD)
 
         # Do some local modifications
         m.execute("semanage fcontext --add -t samba_share_t /var/tmp/")
@@ -86,7 +73,7 @@ class TestSelinux(MachineCase):
         # starting rhsm.service), so let's give them some time to
         # appear before cleaning it all out.
         with b.wait_timeout(60):
-            b.wait_js_cond("ph_in_text('body', 'No SELinux alerts.') || ph_is_present('tbody .pf-c-table__toggle')")
+            b.wait_js_cond("ph_in_text('body', 'No SELinux alerts.') || ph_is_present('tbody .pf-v5-c-table__toggle')")
         time.sleep(30)
 
         dismiss_sel = ".selinux-alert-dismiss"
@@ -94,7 +81,7 @@ class TestSelinux(MachineCase):
         # there are some distros with broken SELinux policies which always appear; so first, clean these up
         while True:
             # we either have no alerts, or an expand button in the table
-            b.wait_js_cond("ph_in_text('body', 'No SELinux alerts.') || ph_is_present('tbody .pf-c-table__toggle')")
+            b.wait_js_cond("ph_in_text('body', 'No SELinux alerts.') || ph_is_present('tbody .pf-v5-c-table__toggle')")
             if "No SELinux alerts." in b.text('body'):
                 break
             num_alerts = b.call_js_func("ph_count", "#selinux-alerts tbody")
@@ -124,7 +111,7 @@ class TestSelinux(MachineCase):
             b.wait_visible(row_selector)
 
         # expand it to see details
-        toggle_selector = row_selector + " .pf-c-table__toggle button"
+        toggle_selector = row_selector + " .pf-v5-c-table__toggle button"
         b.click(toggle_selector)
 
         # this should have two alerts, but there seems to be a known issue that some messages are delayed
@@ -145,8 +132,8 @@ class TestSelinux(MachineCase):
         sebool_path = m.execute("command -v setsebool").strip()
         m.execute(f"chmod a-x {sebool_path}")
         b.click(f"{sebool_selector1} button{self.default_btn_class}")
-        b.wait_in_text(f"{sebool_selector1} .pf-c-alert", "Solution failed")
-        b.wait_in_text(f"{sebool_selector1} .pf-c-alert", "setsebool: Permission denied")
+        b.wait_in_text(f"{sebool_selector1} .pf-v5-c-alert", "Solution failed")
+        b.wait_in_text(f"{sebool_selector1} .pf-v5-c-alert", "setsebool: Permission denied")
 
         # we can't re-attempt the solution, dismiss it
         b.click(row_selector + " input[type=checkbox]")
@@ -161,7 +148,7 @@ class TestSelinux(MachineCase):
 
         # applying solution works now
         b.click(sebool_selector1 + " button" + self.default_btn_class)
-        b.wait_in_text(sebool_selector1 + " .pf-c-alert__title", "Solution applied successfully")
+        b.wait_in_text(sebool_selector1 + " .pf-v5-c-alert__title", "Solution applied successfully")
         self.assertIn("-> on", m.execute("getsebool httpd_enable_homedirs"))
         # system modifications automatically update for this new sebool
         # was "enable homedir", is now "read home directory"
@@ -189,7 +176,7 @@ class TestSelinux(MachineCase):
             b.wait_visible(row_selector)
 
         # expand it to see details
-        toggle_selector = row_selector + " .pf-c-table__toggle button"
+        toggle_selector = row_selector + " .pf-v5-c-table__toggle button"
         b.click(toggle_selector)
 
         try:
@@ -204,11 +191,11 @@ class TestSelinux(MachineCase):
             b.wait_not_present(btn_sel)
 
             # the fix should be applied
-            b.wait_in_text(row_selector + " .pf-c-alert__title", "Solution applied successfully")
+            b.wait_in_text(row_selector + " .pf-v5-c-alert__title", "Solution applied successfully")
 
             # and the button should not come back
             b.wait_not_present(btn_sel)
-        except Error:
+        except testlib.Error:
             print("==== sealert -l '*' ====")
             print(m.execute("sealert -l '*'"))
             print("==== audit.log  ====")
@@ -220,17 +207,14 @@ class TestSelinux(MachineCase):
         b.click(dismiss_sel)
         b.wait_not_present(row_selector)
 
-        try:
-            b.grant_permissions("clipboardReadWrite", "clipboardSanitizedWrite")
-        except RuntimeError:
-            # fallback for older Chrome releases
-            b.grant_permissions("clipboardRead", "clipboardWrite")
+        b.grant_permissions("clipboard-read", "clipboard-write")
 
-        b.wait_visible(".pf-c-data-list__cell:contains(Allow zebra)")
-        b.wait_visible(".pf-c-data-list__cell:contains(fcontext -a -f a -t samba_share_t -r 's0' '/var/tmp/')")
+        b.wait_visible(".pf-v5-c-data-list__cell:contains(Allow zebra)")
+        b.wait_visible(".pf-v5-c-data-list__cell:contains(fcontext -a -f a -t samba_share_t -r 's0' '/var/tmp/')")
         b.click("button:contains('View automation script')")
-        shell_script_sel = ".automation-script-modal .pf-c-modal-box__body section:nth-child(2) textarea"
-        ansible_script_sel = ".automation-script-modal .pf-c-modal-box__body section:nth-child(3) textarea"
+        ansible_script_sel = ".automation-script-modal .pf-v5-c-modal-box__body section:nth-child(2) textarea"
+        shell_script_sel = ".automation-script-modal .pf-v5-c-modal-box__body section:nth-child(3) textarea"
+        b.click("button:contains('Shell')")
         b.wait_in_text(shell_script_sel, "boolean -D")
         b.wait_in_text(shell_script_sel, "fcontext -D")
         b.wait_in_text(shell_script_sel, "boolean -m -1 zebra_write_config")
@@ -242,7 +226,11 @@ class TestSelinux(MachineCase):
             # See https://github.com/SELinuxProject/selinux/commit/3a9b4505b
             # Combining of versions < 3.0 with versions >= 3.0 provides a bit
             # different outputs.
-            return script.replace("permissive -D\n", "")
+            script = script.replace("permissive -D\n", "")
+            # likewise, this only started to exist in Fedora 40
+            if not m.image.startswith('fedora-4'):
+                script = script.replace("boolean -m -1 selinuxuser_execmod\n", "")
+            return script
 
         b.click("button:contains('Ansible')")
         b.wait_text_matches(ansible_script_sel, "Allow zebra.*write.*config")
@@ -263,9 +251,8 @@ class TestSelinux(MachineCase):
         b.reload()
         b.enter_page("/selinux")
         with b.wait_timeout(30):
-            b.wait_visible(".pf-c-data-list__cell:contains(Disallow zebra)")
+            b.wait_visible(".pf-v5-c-data-list__cell:contains(Disallow zebra)")
         b.click("button:contains('View automation script')")
-        b.click("button:contains('Ansible')")
         ansible_m.write("roles/selinux/tasks/main.yml", b.text(ansible_script_sel))
         se_before = se_after
         ansible_m.execute("ansible -m include_role -a name=selinux localhost")
@@ -281,10 +268,10 @@ class TestSelinux(MachineCase):
         b.go("/system/terminal")
         b.enter_page("/system/terminal")
         b.focus('.terminal')
-        b.key_press("\"\r")
+        b.input_text('"\n')
         # Right click and paste
         b.mouse(".terminal", "contextmenu", btn=2)
-        b.click('.contextMenu .contextMenuOption:nth-child(2)')
+        b.click('.contextMenu li:nth-child(2) button')
         b.wait_in_text(".xterm-accessibility-tree", "semanage import <<EOF")
         b.wait_in_text(".xterm-accessibility-tree", "boolean -D")
         b.wait_in_text(".xterm-accessibility-tree", "boolean -m -0 zebra_write_config")
@@ -297,20 +284,27 @@ class TestSelinux(MachineCase):
         b.enter_page("/selinux")
         with b.wait_timeout(30):
             if m.image.startswith("rhel"):
-                # insights-client sets itself as permissive on RHEL, and `semanage permissive -D` gets OOM-killed
-                b.wait_text_matches("ul[aria-label='System modifications']", "No system modifications|permissive -a insights_client_t")
+                # HACK: rhc sets itself as permissive on RHEL; https://issues.redhat.com/browse/RHEL-20352
+                b.wait_text_matches("ul[aria-label='System modifications']", "No system modifications|permissive -a rhcd_t")
             else:
                 b.wait_text("ul[aria-label='System modifications']", "No system modifications")
         b.relogin("/selinux", "admin", superuser=False)
         b.wait_text("ul[aria-label='System modifications']", "The logged in user is not permitted to view system modifications")
 
-    @skipImage("No cockpit-selinux", "debian-*", "ubuntu-*", "arch")
-    @skipOstree("No cockpit-selinux")
-    def testEnforcingToggle(self):
+
+@testlib.skipImage("No cockpit-selinux", "debian-*", "ubuntu-*", "arch")
+@testlib.skipOstree("No cockpit-selinux")
+@testlib.nondestructive
+class TestSelinuxEnforcing(testlib.MachineCase):
+    def test(self):
         b = self.browser
         m = self.machine
 
         self.login_and_go("/selinux")
+
+        # https://bugzilla.redhat.com/show_bug.cgi?id=2293652
+        if self.machine.image == "fedora-40":
+            self.allow_browser_errors('Warning: Encountered two children with the same key.*')
 
         #########################################################
         # wait for the page to be present
@@ -319,15 +313,16 @@ class TestSelinux(MachineCase):
         def assertEnforce(active):
             # polled every 10s
             with b.wait_timeout(20):
-                b.wait_visible(".pf-c-switch__input" + (active and ":checked" or ":not(:checked)"))
+                b.wait_visible(".pf-v5-c-switch__input" + (":checked" if active else ":not(:checked)"))
 
         # SELinux should be enabled and enforcing at the beginning
-        assertEnforce(True)
+        assertEnforce(active=True)
+        self.addCleanup(m.execute, "setenforce 1")
         m.execute("getenforce | grep -q 'Enforcing'")
 
         # now set to permissive using the ui button
-        b.click(".pf-c-switch__input")
-        assertEnforce(False)
+        b.click(".pf-v5-c-switch__input")
+        assertEnforce(active=False)
         m.execute("getenforce | grep -q 'Permissive'")
 
         # when in permissive mode, expect a warning
@@ -335,7 +330,7 @@ class TestSelinux(MachineCase):
 
         # switch back using cli, ui should react
         m.execute("setenforce 1")
-        assertEnforce(True)
+        assertEnforce(active=True)
 
         # warning should disappear
         b.wait_not_in_text("div.selinux-policy-ct", "Setting deviates")
@@ -352,9 +347,9 @@ class TestSelinux(MachineCase):
         b.switch_to_top()
         b.go("/selinux")
         b.enter_page("/selinux")
-        assertEnforce(False)
+        assertEnforce(active=False)
         b.wait_in_text("div.selinux-policy-ct", "Setting deviates")
 
 
 if __name__ == '__main__':
-    test_main()
+    testlib.test_main()

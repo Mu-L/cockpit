@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import cockpit from "cockpit";
@@ -27,9 +27,9 @@ import { AbrtLogDetails } from "./abrtLog.jsx";
 import { ExclamationCircleIcon } from '@patternfly/react-icons';
 import { Breadcrumb, BreadcrumbItem } from "@patternfly/react-core/dist/esm/components/Breadcrumb/index.js";
 import { Button } from "@patternfly/react-core/dist/esm/components/Button/index.js";
-import { Card, CardActions, CardBody, CardHeader, CardHeaderMain, CardTitle } from "@patternfly/react-core/dist/esm/components/Card/index.js";
+import { Card, CardBody, CardHeader, CardTitle } from '@patternfly/react-core/dist/esm/components/Card/index.js';
 import { DescriptionList, DescriptionListDescription, DescriptionListGroup, DescriptionListTerm } from "@patternfly/react-core/dist/esm/components/DescriptionList/index.js";
-import { Page, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
+import { Page, PageBreadcrumb, PageSection } from "@patternfly/react-core/dist/esm/components/Page/index.js";
 import { Gallery, GalleryItem } from "@patternfly/react-core/dist/esm/layouts/Gallery/index.js";
 
 const _ = cockpit.gettext;
@@ -47,28 +47,25 @@ const LogDetails = ({ entry }) => {
     if (["service", "target", "socket", "timer", "path"].indexOf(service.split(".").slice(-1)[0]) === -1)
         service = undefined;
 
+    const actions = service && (
+        <Button variant="link" onClick={() => cockpit.jump("/system/services#/" + service + (is_user ? "?owner=user" : "")) }>
+            {cockpit.format(_("Go to $0"), service)}
+        </Button>
+    );
+
     return (
         <GalleryItem>
             <Card>
-                <CardHeader>
-                    <CardHeaderMain>
-                        <h2 id="entry-heading">{id}</h2>
-                    </CardHeaderMain>
-                    { service &&
-                        <CardActions>
-                            <Button variant="link" onClick={() => cockpit.jump("/system/services#/" + service + (is_user ? "?owner=user" : "")) }>
-                                {cockpit.format(_("Go to $0"), service)}
-                            </Button>
-                        </CardActions>
-                    }
+                <CardHeader actions={{ actions }}>
+                    <h2 id="entry-heading">{id}</h2>
                 </CardHeader>
-                <CardTitle>{journal.printable(entry.MESSAGE)}</CardTitle>
+                <CardTitle>{journal.printable(entry.MESSAGE, "MESSAGE")}</CardTitle>
                 <CardBody>
                     <DescriptionList className="pf-m-horizontal-on-sm">
                         { general.map(key =>
                             <DescriptionListGroup key={key}>
                                 <DescriptionListTerm>{key}</DescriptionListTerm>
-                                <DescriptionListDescription>{journal.printable(entry[key])}</DescriptionListDescription>
+                                <DescriptionListDescription>{journal.printable(entry[key], key)}</DescriptionListDescription>
                             </DescriptionListGroup>
                         )}
                     </DescriptionList>
@@ -191,16 +188,15 @@ export class LogEntry extends React.Component {
         }
 
         return (
-            <Page groupProps={{ sticky: 'top' }}
-                  isBreadcrumbGrouped
-                  id="log-details"
-                  breadcrumb={
-                      <Breadcrumb>
-                          <BreadcrumbItem onClick={this.goHome} className="pf-c-breadcrumb__link">{_("Logs")}</BreadcrumbItem>
-                          <BreadcrumbItem isActive>
-                              {breadcrumb}
-                          </BreadcrumbItem>
-                      </Breadcrumb>}>
+            <Page id="log-details" className="log-details">
+                <PageBreadcrumb stickyOnBreakpoint={{ default: "top" }}>
+                    <Breadcrumb>
+                        <BreadcrumbItem onClick={this.goHome} className="pf-v5-c-breadcrumb__link">{_("Logs")}</BreadcrumbItem>
+                        <BreadcrumbItem isActive>
+                            {breadcrumb}
+                        </BreadcrumbItem>
+                    </Breadcrumb>
+                </PageBreadcrumb>
                 <PageSection>
                     <Gallery hasGutter>
                         {content}

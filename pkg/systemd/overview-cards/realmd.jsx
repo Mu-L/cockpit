@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Cockpit; If not, see <http://www.gnu.org/licenses/>.
+ * along with Cockpit; If not, see <https://www.gnu.org/licenses/>.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -33,6 +33,7 @@ import cockpit from "cockpit";
 import { Privileged } from "cockpit-components-privileged.jsx";
 import { superuser } from "superuser";
 import { useEvent } from "hooks.js";
+import { FormHelper } from "cockpit-components-form-helper";
 import { install_dialog } from "cockpit-components-install-dialog.jsx";
 import * as packagekit from "packagekit.js";
 import { useDialogs } from "dialogs.jsx";
@@ -95,6 +96,15 @@ export class RealmdClient {
     }
 
     initProxy() {
+        // Ignore intermediate states of superuser.allowed to
+        // avoid initializing the proxy twice during page
+        // load. This is less wasteful and helps the tests avoid
+        // race conditions. We are guaranteed to see a real "true"
+        // or "false" value eventually.
+        //
+        if (superuser.allowed === null)
+            return;
+
         if (this.dbus_realmd) {
             this.dbus_realmd.removeEventListener("close", this.onClose);
             this.dbus_realmd.close();
@@ -185,6 +195,12 @@ export class RealmdClient {
         // skip this on remote ssh hosts, only set up ws hosts
         if (cockpit.transport.host !== "localhost")
             return Promise.resolve();
+
+        const server_sw = find_detail(realm, "server-software");
+        if (server_sw !== "ipa") {
+            console.log("cleaning up ws credentials not supported for server software", server_sw);
+            return Promise.resolve();
+        }
 
         const kerberos = this.dbus_realmd.proxy(KERBEROS, realm.path);
         return kerberos.wait()
@@ -305,20 +321,6 @@ const LeaveDialog = ({ realmd_client }) => {
         </Modal>);
 };
 
-const DOMAIN_VALID_HELPER_TEXT = {
-    default: _("Validating address"),
-    success: _("Contacted domain"),
-    error: _("Domain could not be contacted"),
-    unsupported: _("Domain is not supported"),
-};
-
-const DOMAIN_VALID_HELPER_ICON = {
-    default: <InProgressIcon />,
-    success: <CheckIcon />,
-    error: <ExclamationCircleIcon />,
-    unsupported: <ExclamationCircleIcon />,
-};
-
 let domainValidateTimeout;
 
 const JoinDialog = ({ realmd_client }) => {
@@ -388,6 +390,20 @@ const JoinDialog = ({ realmd_client }) => {
 
     const join_disabled = pending || addressValid !== "success" || !admin || !kerberosMembership;
 
+    const DOMAIN_VALID_HELPER_TEXT = {
+        default: _("Validating address"),
+        success: _("Contacted domain"),
+        error: _("Domain could not be contacted"),
+        unsupported: _("Domain is not supported"),
+    };
+
+    const DOMAIN_VALID_HELPER_ICON = {
+        default: <InProgressIcon />,
+        success: <CheckIcon />,
+        error: <ExclamationCircleIcon />,
+        unsupported: <ExclamationCircleIcon />,
+    };
+
     const domainHelperText = DOMAIN_VALID_HELPER_TEXT[addressValid];
     const domainHelperIcon = DOMAIN_VALID_HELPER_ICON[addressValid];
 
@@ -421,20 +437,19 @@ const JoinDialog = ({ realmd_client }) => {
                }
                title={ _("dialog-title", "Join a domain") }>
             <Form isHorizontal onSubmit={onJoin}>
-                <FormGroup label={ _("Domain address") } fieldId="realms-op-address" validated={addressValid}
-                           helperText={domainHelperText} helperTextInvalid={domainHelperText}
-                           helperTextIcon={domainHelperIcon} helperTextInvalidIcon={domainHelperIcon}>
+                <FormGroup label={ _("Domain address") } fieldId="realms-op-address" validated={addressValid}>
                     <TextInput id="realms-op-address" placeholder="domain.example.com"
                                data-discover={ (!addressValid || addressValid == "default") ? null : "done" }
-                               value={address} onChange={validateAddress} isDisabled={pending} />
+                               value={address} onChange={(_event, value) => validateAddress(value)} isDisabled={pending} />
                 </FormGroup>
 
                 <FormGroup label={ _("Domain administrator name") } fieldId="realms-op-admin">
-                    <TextInput id="realms-op-admin" placeholder="admin" value={admin} onChange={setAdmin} isDisabled={pending} />
+                    <TextInput id="realms-op-admin" placeholder="admin" value={admin} onChange={(_event, value) => setAdmin(value)} isDisabled={pending} />
                 </FormGroup>
                 <FormGroup label={ _("Domain administrator password") } fieldId="realms-op-admin-password">
-                    <TextInput id="realms-op-admin-password" type="password" value={adminPassword} onChange={setAdminPassword} isDisabled={pending} />
+                    <TextInput id="realms-op-admin-password" type="password" value={adminPassword} onChange={(_event, value) => setAdminPassword(value)} isDisabled={pending} />
                 </FormGroup>
+                <FormHelper fieldId="realms-op-address" helperText={domainHelperText} helperTextInvalid={addressValid == "error" && domainHelperText} icon={domainHelperIcon} />
             </Form>
         </Modal>);
 };
@@ -445,7 +460,7 @@ export const RealmButton = ({ realmd_client }) => {
     useEvent(superuser, "changed");
 
     const buttonTooltip = superuser.allowed ? realmd_client.error : _("Not permitted to configure realms");
-    const buttonText = realmd_client.joined.length ? realmd_client.joined.map(r => r.Name).join(", ") : _("Join domain");
+    const buttonText = !realmd_client.install_realmd ? (realmd_client.joined.length ? realmd_client.joined.map(r => r.Name).join(", ") : _("Join domain")) : _("Install realmd support");
     const buttonDisabled = !superuser.allowed || (realmd_client.error && !realmd_client.install_realmd);
 
     const onClicked = () => {
@@ -467,7 +482,7 @@ export const RealmButton = ({ realmd_client }) => {
                     excuse={ buttonTooltip }>
             <Button id="system_information_domain_button" variant="link"
                     onClick={onClicked}
-                    isInline isDisabled={buttonDisabled} aria-label={_("Join domain")}>
+                    isInline isDisabled={buttonDisabled} aria-label={buttonText}>
                 { buttonText }
             </Button>
         </Privileged>);
